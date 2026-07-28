@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "goal_id": "example-generated-goal",
+  "title": "Example generated shadow-mode Goal",
+  "mode": "shadow",
+  "repository": {
+    "name_with_owner": "example-org/example-repo",
+    "base_branch": "main"
+  },
+  "base_head": "1111111111111111111111111111111111111111",
+  "protocol": {
+    "entry": "docs/planning/session-role-protocol.md",
+    "shared": "docs/planning/session-protocol/shared.md",
+    "foreman": "docs/planning/session-protocol/foreman.md",
+    "captain": "docs/planning/session-protocol/captain.md",
+    "role_kernel": "docs/planning/session-protocol/role-kernel.md"
+  },
+  "tasks": [
+    {
+      "id": "TASK-example",
+      "title": "Exercise the local control plane without external mutations",
+      "issue": null,
+      "dependencies": [],
+      "integration_order": 1,
+      "parallel_group": "example-wave-1",
+      "risk_class": "STANDARD",
+      "packet_source": "docs/planning/goals/example/packets/TASK-example-r1.md",
+      "packet_revision": 1,
+      "expected_write_set": [
+        "docs/planning/goals/example-generated-goal/**"
+      ],
+      "conflict_domains": [
+        "example-control-plane"
+      ],
+      "resource_requirements": []
+    }
+  ]
+}

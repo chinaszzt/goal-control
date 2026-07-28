@@ -1,0 +1,566 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chinaszzt.github.io/goal-control/schemas/launch-manifest.schema.json",
+  "title": "Goal control launch manifest",
+  "description": "Exact identity of one role execution. Display names are descriptive only; automation binds paths, hashes, PID/target identity, and leases.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "launch_id",
+    "goal_id",
+    "task_id",
+    "role",
+    "control_epoch",
+    "state_revision",
+    "thread",
+    "packet",
+    "repository",
+    "runtime",
+    "execution",
+    "resource_leases",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "launch_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "goal_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "task_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "role": {
+      "$ref": "#/$defs/role"
+    },
+    "control_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "thread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "host_id",
+        "cwd"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "host_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name_with_owner",
+        "origin_url",
+        "base_branch",
+        "base_head",
+        "full_head",
+        "branch",
+        "root",
+        "worktree"
+      ],
+      "properties": {
+        "name_with_owner": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "origin_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^/?#@]+(?:/[^?#]*)?$",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "base_branch": {
+          "type": "string",
+          "const": "main"
+        },
+        "base_head": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "full_head": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "worktree": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_version",
+        "pnpm_version",
+        "lockfile_sha256"
+      ],
+      "properties": {
+        "node_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "pnpm_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "lockfile_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requested": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "actual": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "reasoning_effort": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "runtime_incarnation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch",
+        "nonce",
+        "rotation_event_id"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "rotation_event_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "worker_bootstrap": {
+      "$ref": "#/$defs/workerBootstrap"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "write_mode",
+        "task_nonce",
+        "target"
+      ],
+      "properties": {
+        "environment": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "account_alias": {
+          "$ref": "#/$defs/safeAlias"
+        },
+        "tim_alias": {
+          "$ref": "#/$defs/safeAlias"
+        },
+        "write_mode": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "TESTING_WRITE",
+            "READ_ONLY"
+          ]
+        },
+        "task_nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{16,128}$"
+        },
+        "target": {
+          "$ref": "#/$defs/executionTarget"
+        },
+        "identity_probe": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "environment": { "not": { "const": "none" } } }, "required": ["environment"] },
+              { "properties": { "write_mode": { "not": { "const": "NONE" } } }, "required": ["write_mode"] }
+            ]
+          },
+          "then": { "required": ["identity_probe"] }
+        }
+      ]
+    },
+    "pull_request": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/pullRequest"
+        }
+      ]
+    },
+    "resource_leases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/safeId"
+      }
+    },
+    "created_at": {
+      "$ref": "#/$defs/dateTime"
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "safeAlias": {
+      "type": "string",
+      "description": "Non-secret alias only; phone numbers, emails, tokens, and raw profile content are forbidden by protocol.",
+      "pattern": "^[A-Za-z][A-Za-z0-9._-]*$",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "FOREMAN",
+        "CAPTAIN",
+        "DEV",
+        "REVIEW",
+        "RECEIPT"
+      ]
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "repoPath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workerBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "receipt_file",
+        "receipt_sha256",
+        "identity_plan_sha256",
+        "identity_observation_sha256",
+        "operation_id",
+        "challenge",
+        "thread",
+        "host",
+        "worktree",
+        "git_dir",
+        "common_git_dir",
+        "head",
+        "branch",
+        "canary_policy",
+        "binding_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "protocol": {
+          "const": "goalctl-worker-canary-bootstrap-v1"
+        },
+        "receipt_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "identity_plan_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "identity_observation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "challenge": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "thread": {
+          "$ref": "#/$defs/safeId"
+        },
+        "host": {
+          "$ref": "#/$defs/safeId"
+        },
+        "worktree": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "git_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "common_git_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "head": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "branch": {
+          "type": "string",
+          "pattern": "^codex/.+",
+          "maxLength": 300
+        },
+        "canary_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/repoPath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "executionTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "CLI",
+            "PREVIEW",
+            "ELECTRON",
+            "BROWSER"
+          ]
+        },
+        "executable_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "started_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "preview_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/?#@]+(?:/[^#]*)?$"
+        },
+        "build_head": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "user_data_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "cdp_target_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "window_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "not": { "const": "NONE" } } }, "required": ["kind"] },
+          "then": { "required": ["executable_path"] }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["PREVIEW", "ELECTRON", "BROWSER"] } }, "required": ["kind"] },
+          "then": { "required": ["pid", "started_at"] }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["ELECTRON", "BROWSER"] } }, "required": ["kind"] },
+          "then": { "required": ["user_data_dir"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "PREVIEW" } }, "required": ["kind"] },
+          "then": { "required": ["preview_url"] }
+        },
+        {
+          "if": { "required": ["preview_url"] },
+          "then": { "properties": { "kind": { "const": "PREVIEW" } } }
+        }
+      ]
+    },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "number",
+        "base",
+        "head"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "base": {
+          "const": "main"
+        },
+        "head": {
+          "$ref": "#/$defs/fullSha"
+        }
+      }
+    }
+  }
+}

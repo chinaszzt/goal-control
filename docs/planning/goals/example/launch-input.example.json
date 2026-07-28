@@ -1,0 +1,16 @@
+{
+  "thread_title": "Example DEV task",
+  "runtime_model": {
+    "requested": "gpt-5",
+    "actual": "gpt-5",
+    "reasoning_effort": "high"
+  },
+  "execution": {
+    "environment": "none",
+    "write_mode": "NONE",
+    "target": {
+      "kind": "NONE"
+    }
+  },
+  "resource_leases": []
+}

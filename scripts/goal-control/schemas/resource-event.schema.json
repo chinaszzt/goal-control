@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chinaszzt.github.io/goal-control/schemas/resource-event.schema.json",
+  "title": "Goal control persisted resource event",
+  "description": "Append-only, hash-chained lease event stored in the git common-dir. Lease ownership is proven through a 0600 capability file; raw capability contents never appear in stdout, argv, or JSON records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "type",
+    "accepted_at",
+    "actor",
+    "log_sequence",
+    "previous_event_sha256",
+    "event_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "LEASE_ACQUIRED",
+        "LEASE_RENEWED",
+        "LEASE_RELEASED",
+        "LEASE_REAPED"
+      ]
+    },
+    "accepted_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "actor": {
+      "$ref": "#/$defs/owner"
+    },
+    "lease": {
+      "$ref": "#/$defs/lease"
+    },
+    "lease_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "from_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "to_revision": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "expires_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "evidence_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "log_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "previous_event_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/hash" }
+      ]
+    },
+    "event_sha256": {
+      "$ref": "#/$defs/hash"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "LEASE_ACQUIRED"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "lease"
+        ]
+      },
+      "else": {
+        "required": [
+          "lease_id",
+          "from_revision",
+          "to_revision"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "LEASE_RENEWED"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "expires_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "LEASE_REAPED"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "evidence_id"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "FOREMAN",
+        "CAPTAIN",
+        "DEV",
+        "REVIEW",
+        "RECEIPT"
+      ]
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal_id",
+        "task_id",
+        "role",
+        "thread_id",
+        "host_id"
+      ],
+      "properties": {
+        "goal_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "role": {
+          "$ref": "#/$defs/role"
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "host_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "resourceKey": {
+      "type": "string",
+      "description": "Canonical kind:id[:sub-id...] key. Kind is lowercase kebab-case. An expired lease retains ownership until an authorized evidence-backed reap.",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*:[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+      "minLength": 3,
+      "maxLength": 500
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lease_id",
+        "resource",
+        "access",
+        "owner",
+        "owner_capability_sha256",
+        "owner_capability_file",
+        "revision",
+        "fencing_token",
+        "status",
+        "acquired_at",
+        "updated_at",
+        "expires_at"
+      ],
+      "properties": {
+        "lease_id": {
+          "$ref": "#/$defs/opaqueId"
+        },
+        "resource": {
+          "$ref": "#/$defs/resourceKey"
+        },
+        "access": {
+          "type": "string",
+          "description": "Two leases may coexist on one resource only when both are SHARED_READ.",
+          "enum": [
+            "EXCLUSIVE",
+            "SHARED_READ"
+          ]
+        },
+        "owner": {
+          "$ref": "#/$defs/owner"
+        },
+        "owner_capability_sha256": {
+          "type": "string",
+          "description": "Lowercase hex verifier only; raw capability contents must never be persisted in JSON.",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "owner_capability_file": {
+          "type": "string",
+          "description": "Canonical path to the owner capability file. The file itself must be mode 0600.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "revision": {
+          "const": 1
+        },
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "const": "ACTIVE"
+        },
+        "acquired_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/dateTime"
+        }
+      }
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
