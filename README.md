@@ -102,6 +102,10 @@ L0/L1 用于快速迭代，不替代 L2。当前 lab 不启动 worker、不推�
 创建 PR、merge 或 archive。任何会影响 decoder、身份绑定或外部副作用的版本，都必须在
 真实集成仓完成一次 fresh Goal 验收后才能视为可发布。
 
+后续迭代的依赖顺序、小任务试跑场景、CI 分层与真实宿主 L2 频率见
+[Control-plane validation roadmap](docs/validation-roadmap.md)。对应工作已拆为可独立接手的
+[GitHub issues](https://github.com/chinaszzt/goal-control/issues)。
+
 ## 目录
 
 ```text
