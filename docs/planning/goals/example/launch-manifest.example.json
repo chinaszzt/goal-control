@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "launch_id": "launch-example-dev-0001",
+  "goal_id": "example-goal",
+  "task_id": "TASK-example",
+  "role": "DEV",
+  "control_epoch": 0,
+  "state_revision": 3,
+  "thread": {
+    "id": "thread-example-dev-0001",
+    "host_id": "host-example",
+    "title": "Example DEV task",
+    "cwd": "/path/to/example-repo/.worktrees/task-example"
+  },
+  "packet": {
+    "revision": 1,
+    "path": "docs/planning/goals/example/packets/TASK-example-r1.md",
+    "sha256": "sha256:0904cdad4b81f1f0812f189af3ea101ac9d2948aafd1c7c92ee0a23626581589"
+  },
+  "repository": {
+    "name_with_owner": "example-org/example-repo",
+    "origin_url": "https://example.invalid/example-org/example-repo.git",
+    "base_branch": "main",
+    "base_head": "1111111111111111111111111111111111111111",
+    "full_head": "2222222222222222222222222222222222222222",
+    "branch": "codex/example-task",
+    "root": "/path/to/example-repo",
+    "worktree": "/path/to/example-repo/.worktrees/task-example"
+  },
+  "runtime": {
+    "node_version": "v22.0.0",
+    "pnpm_version": "10.0.0",
+    "lockfile_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "model": {
+      "requested": "example-model",
+      "actual": "example-model",
+      "reasoning_effort": "medium"
+    }
+  },
+  "execution": {
+    "environment": "example-testing",
+    "domain": "example.invalid",
+    "account_alias": "exampleAccount",
+    "tim_alias": "exampleTim",
+    "write_mode": "NONE",
+    "task_nonce": "example_task_nonce_0001",
+    "identity_probe": {
+      "path": "/path/to/git-common-dir/goal-control/v1/probes/example_task_nonce_0001.json",
+      "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "target": {
+      "kind": "CLI",
+      "executable_path": "/path/to/example-node",
+      "pid": 4242,
+      "started_at": "2026-01-01T00:00:00Z",
+      "build_head": "2222222222222222222222222222222222222222"
+    }
+  },
+  "pull_request": null,
+  "resource_leases": [
+    "lease-example-port-0001",
+    "lease-example-profile-0001",
+    "lease-example-fixture-0001"
+  ],
+  "created_at": "2026-01-01T00:00:00Z"
+}

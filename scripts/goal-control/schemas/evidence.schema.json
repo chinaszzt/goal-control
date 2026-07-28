@@ -1,0 +1,494 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chinaszzt.github.io/goal-control/schemas/evidence.schema.json",
+  "title": "Goal control evidence record",
+  "description": "Durable gate or verification evidence bound to one immutable packet and full task HEAD.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "goal_id",
+    "task_id",
+    "kind",
+    "status",
+    "producer",
+    "state_revision",
+    "packet",
+    "packet_sha256",
+    "base_head",
+    "full_head",
+    "created_at",
+    "uri",
+    "registry_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "evidence_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "goal_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "task_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "PREFLIGHT",
+        "FAST",
+        "FULL_CI",
+        "AC_AUDIT",
+        "DEV_SELF_REVIEW",
+        "REVIEW",
+        "RECEIPT",
+        "PREVIEW",
+        "SEAM",
+        "ENVIRONMENT",
+        "APPROVAL",
+        "HOLD_ASSERTION",
+        "HOLD_RESOLUTION",
+        "MERGE_BOUNDARY",
+        "ROLE_FAILURE",
+        "CONTROL"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "STALE"
+      ]
+    },
+    "producer": {
+      "$ref": "#/$defs/actor"
+    },
+    "state_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stage": {
+      "type": "string",
+      "description": "Optional workflow stage label emitted by the evidence producer.",
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "packet": {
+      "$ref": "#/$defs/packetBinding"
+    },
+    "packet_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Direct FSM evidence binding. Runtime validation requires equality with packet.sha256."
+    },
+    "base_head": {
+      "$ref": "#/$defs/fullSha"
+    },
+    "full_head": {
+      "$ref": "#/$defs/fullSha"
+    },
+    "created_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "uri": {
+      "type": "string",
+      "description": "Durable file, PR, check, or artifact reference. It must not embed credentials.",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "source_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Digest of the durable source artifact for externally registered evidence."
+    },
+    "registry_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Control-plane seal over the canonical evidence record without this field."
+    },
+    "launch_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "launch_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Controller-computed digest of the launch manifest attested by PREFLIGHT."
+    },
+    "launch_uri": {
+      "type": "string",
+      "description": "Persisted validated launch manifest used to rematerialize role context after compaction.",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "runtime_launch_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Digest of the immutable canonical runtime launch when launch_uri points to a source-checkpoint candidate."
+    },
+    "runtime_launch_uri": {
+      "type": "string",
+      "description": "Canonical runtime launch URI paired with a source-checkpoint candidate artifact.",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "pull_request": {
+      "$ref": "#/$defs/pullRequestBinding"
+    },
+    "resource_lease": {
+      "$ref": "#/$defs/resourceLeaseBinding"
+    },
+    "command": {
+      "type": "array",
+      "description": "Executable plus argument vector; shell-concatenated commands are deliberately not used.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller",
+        "adapter"
+      ],
+      "properties": {
+        "controller": {
+          "const": "goalctl"
+        },
+        "adapter": {
+          "type": "string",
+          "enum": [
+            "PREFLIGHT",
+            "FAST",
+            "FULL_CI",
+            "AC_AUDIT"
+          ]
+        }
+      }
+    },
+    "invalidated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at",
+        "reason"
+      ],
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "PACKET_CHANGED",
+            "HEAD_CHANGED",
+            "STATE_REOPENED",
+            "MANUAL_INVALIDATION"
+          ]
+        },
+        "superseded_by": {
+          "$ref": "#/$defs/opaqueId"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "PREFLIGHT",
+              "FAST",
+              "FULL_CI",
+              "AC_AUDIT"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "attestation"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "PREFLIGHT"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "launch_sha256",
+          "launch_uri"
+        ],
+        "properties": {
+          "attestation": {
+            "properties": {
+              "adapter": {
+                "const": "PREFLIGHT"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "runtime_launch_sha256"
+            ]
+          },
+          {
+            "required": [
+              "runtime_launch_uri"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "required": [
+          "runtime_launch_sha256",
+          "runtime_launch_uri"
+        ],
+        "properties": {
+          "kind": {
+            "const": "PREFLIGHT"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "FAST",
+              "FULL_CI",
+              "AC_AUDIT"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "source_sha256",
+          "command"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["FULL_CI", "AC_AUDIT"]
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["pull_request"]
+      }
+    }
+  ],
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "opaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "FOREMAN",
+        "CAPTAIN",
+        "DEV",
+        "REVIEW",
+        "RECEIPT"
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "thread_id"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/role"
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "host_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "resourceLeaseBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "resource", "revision", "owner", "isolated", "isolation_ref"],
+      "properties": {
+        "lease_id": { "$ref": "#/$defs/opaqueId" },
+        "resource": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["goal_id", "task_id", "role", "thread_id", "host_id"],
+          "properties": {
+            "goal_id": { "$ref": "#/$defs/safeId" },
+            "task_id": { "$ref": "#/$defs/safeId" },
+            "role": { "$ref": "#/$defs/role" },
+            "thread_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "host_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+          }
+        },
+        "isolated": { "const": true },
+        "isolation_ref": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "packetBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "sha256"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "pullRequestBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "number", "url", "base", "head"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
+        },
+        "base": { "const": "main" },
+        "head": { "$ref": "#/$defs/fullSha" }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "FAIL",
+            "BLOCKED",
+            "N/A"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "eventBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "packet_sha256",
+        "full_head",
+        "uri"
+      ],
+      "properties": {
+        "status": {
+          "const": "PASS"
+        },
+        "packet_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "full_head": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

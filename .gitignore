@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+.DS_Store
+*.log
+
+# The controller persists live state in the controlled repository's Git common
+# directory. Never copy a live store into this repository.
+.goal-control/
+.lab/

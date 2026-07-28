@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "goal_id": "example-goal",
+  "title": "Example shadow-mode control-plane goal",
+  "mode": "shadow",
+  "repository": {
+    "name_with_owner": "example-org/example-repo",
+    "base_branch": "main"
+  },
+  "base_head": "1111111111111111111111111111111111111111",
+  "protocol": {
+    "entry": "docs/planning/session-role-protocol.md",
+    "shared": "docs/planning/session-protocol/shared.md",
+    "foreman": "docs/planning/session-protocol/foreman.md",
+    "captain": "docs/planning/session-protocol/captain.md",
+    "role_kernel": "docs/planning/session-protocol/role-kernel.md"
+  },
+  "tasks": [
+    {
+      "id": "TASK-example",
+      "title": "Exercise the local control plane without external mutations",
+      "issue": null,
+      "dependencies": [],
+      "integration_order": 1,
+      "parallel_group": "example-wave-1",
+      "risk_class": "STANDARD",
+      "packet": {
+        "revision": 1,
+        "path": "docs/planning/goals/example/packets/TASK-example-r1.md",
+        "sha256": "sha256:0904cdad4b81f1f0812f189af3ea101ac9d2948aafd1c7c92ee0a23626581589"
+      },
+      "expected_write_set": [
+        "docs/planning/goals/example/**"
+      ],
+      "conflict_domains": [
+        "example-control-plane"
+      ],
+      "resource_requirements": [
+        {
+          "kind": "PORT",
+          "id": "example-preview-port",
+          "access": "EXCLUSIVE"
+        },
+        {
+          "kind": "BROWSER_PROFILE",
+          "id": "example-browser-profile",
+          "access": "EXCLUSIVE"
+        },
+        {
+          "kind": "TEST_DATA",
+          "id": "example-readonly-fixture",
+          "access": "SHARED_READ"
+        }
+      ]
+    }
+  ]
+}
