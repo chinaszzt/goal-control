@@ -747,18 +747,21 @@ function registerWorkerIdentity(
     hostId: string;
     attempt: number;
     launchId: string;
+    role?: "DEV" | "REVIEW" | "RECEIPT";
     registrationLaunchId?: string;
     observedBootstrapBindingSha256?: string;
     beforeRegister?: () => void;
   },
 ): Record<string, any> {
+  const role = values.role || "DEV";
   const identity = roleIdentityObservation(repository, {
     operationId: values.eventId,
     taskId: "TASK-A",
-    role: "DEV",
+    role,
     threadId: values.threadId,
     hostId: values.hostId,
-    sessionId: `actual-session-dev-${values.attempt}`,
+    sessionId:
+      `actual-session-${role.toLowerCase()}-${values.attempt}`,
     launchId: values.launchId,
     workerBootstrapBindingSha256:
       values.observedBootstrapBindingSha256
@@ -776,7 +779,7 @@ function registerWorkerIdentity(
     "prepare-probe-observation-challenge",
     "--goal", "goal-receipt-integration",
     "--task", "TASK-A",
-    "--role", "DEV",
+    "--role", role,
     "--event-id", values.eventId,
     "--canary-plan-sha256",
     bootstrap.planEnvelope.canary_plan_sha256,
@@ -800,7 +803,7 @@ function registerWorkerIdentity(
     registrationEventId: values.eventId,
     goalId: "goal-receipt-integration",
     taskId: "TASK-A",
-    role: "DEV",
+    role,
     threadId: actualThreadId,
     hostId: actualHostId,
     attempt: values.attempt,
@@ -835,7 +838,7 @@ function registerWorkerIdentity(
     "register-role",
     "--goal", "goal-receipt-integration",
     "--task", "TASK-A",
-    "--role", "DEV",
+    "--role", role,
     "--thread", actualThreadId,
     "--host", actualHostId,
     "--attempt", String(values.attempt),
@@ -1115,6 +1118,7 @@ function submitPublicGoalEvent(
     actorRole: "FOREMAN" | "CAPTAIN" | "DEV" | "REVIEW" | "RECEIPT";
     actorCapabilityFile: string;
     payload: Record<string, unknown>;
+    taskId?: string;
     cwd?: string;
     fullHead?: string;
   },
@@ -1124,7 +1128,8 @@ function submitPublicGoalEvent(
     "goal-receipt-integration",
     (current) => current,
   );
-  const state = loaded.snapshot.tasks["TASK-A"];
+  const taskId = values.taskId || "TASK-A";
+  const state = loaded.snapshot.tasks[taskId];
   const actor = state.sessions[values.actorRole];
   const sequenceKey = JSON.stringify([
     actor.role,
@@ -1135,7 +1140,7 @@ function submitPublicGoalEvent(
     schema_version: 1,
     event_id: values.eventId,
     goal_id: "goal-receipt-integration",
-    task_id: "TASK-A",
+    task_id: taskId,
     type: values.type,
     actor: {
       role: actor.role,
@@ -1158,6 +1163,7 @@ function submitPublicGoalEvent(
   return goalCommand([
     "event",
     "--goal", "goal-receipt-integration",
+    "--task", taskId,
     "--file", file,
     "--actor-capability-file", values.actorCapabilityFile,
     "--json",
@@ -1284,6 +1290,7 @@ function git(cwd: string, ...args: string[]): string {
 
 function integrationRepository(
   options: {
+    identityTtlMs?: number;
     twoTasks?: boolean;
     workerBootstrap?: boolean;
   } = {},
@@ -1369,7 +1376,7 @@ function integrationRepository(
     base_head: baseHead,
     probe_observation_receipts: {
       protocol: "goalctl-sealed-probe-observation-v1",
-      max_ttl_ms: 120_000,
+      max_ttl_ms: options.identityTtlMs ?? 120_000,
       host_attestation: {
         algorithm: "ED25519",
         key_id: "host-attestation-test-v1",
@@ -3244,6 +3251,144 @@ describe("sealed probe observation receipt", () => {
     expect(rejected.stderr).not.toContain(secret);
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeSecret);
+
+    const processSecrets = [
+      {
+        secret: `xoxb-${"A".repeat(28)}`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          `--${value}`,
+        ],
+      },
+      {
+        secret: `xoxb-${"B".repeat(28)}`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          "--goal", "goal-receipt-integration",
+          "--task", "TASK-A",
+          "--role", value,
+        ],
+      },
+      {
+        secret: `receipt.${"C".repeat(43)}.json`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          "--event-id", value,
+        ],
+      },
+      {
+        secret: `/private/tmp/${"D".repeat(43)}.cap`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          "--identity-receipt", value,
+        ],
+      },
+      {
+        secret:
+          `https://example.invalid/worker?api_key=${"E".repeat(24)}`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          "--identity-receipt", value,
+        ],
+      },
+      {
+        secret:
+          `https://example.invalid/worker?password=${"F".repeat(24)}`,
+        args: (value: string) => [
+          "prepare-probe-observation-challenge",
+          "--identity-receipt", value,
+        ],
+      },
+    ];
+    for (const processCase of processSecrets) {
+      const beforeProcessRejection = ordinaryFileSnapshot(
+        repository.controlDir,
+      );
+      const processRejection = runGoalctlProcess(
+        repository.root,
+        processCase.args(processCase.secret),
+      );
+      expect(processRejection.status).toBe(2);
+      expect(processRejection.stdout).toBe("");
+      expect(processRejection.stderr).not.toContain(
+        processCase.secret,
+      );
+      expect(ordinaryFileSnapshot(repository.controlDir))
+        .toEqual(beforeProcessRejection);
+    }
+    const fakeAuthorityPath =
+      `/private/tmp/${"Z".repeat(43)}.cap`;
+    const beforeFakeAuthority = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    const fakeAuthority = runGoalctlProcess(repository.root, [
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "FOREMAN",
+      "--event-id", "fake-capability-authority-path-1",
+      "--canary-plan-sha256", plan.canary_plan_sha256,
+      "--issuer-capability-file", fakeAuthorityPath,
+      "--identity-receipt", identityFile,
+      "--identity-receipt-sha256", fileSha256(identityFile),
+      "--json",
+    ]);
+    expect(fakeAuthority.status).toBe(2);
+    expect(fakeAuthority.stdout).toBe("");
+    expect(fakeAuthority.stderr).not.toContain(fakeAuthorityPath);
+    expect(fakeAuthority.stderr).not.toContain("Z".repeat(43));
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeFakeAuthority);
+
+    const malformed = fixture({
+      role: "FOREMAN",
+      eventTag: "malformed-json-no-echo",
+    });
+    const malformedSecret = `xoxb-${"M".repeat(28)}`;
+    writeFileSync(
+      malformed.receiptFile,
+      `{"producer":"${malformedSecret}"`,
+      { mode: 0o600 },
+    );
+    chmodSync(malformed.receiptFile, 0o600);
+    const beforeMalformed = ordinaryFileSnapshot(
+      malformed.repository.controlDir,
+    );
+    const malformedResult = runGoalctlProcess(
+      malformed.repository.root,
+      [
+        "register-role",
+        "--goal", malformed.options.goalId,
+        "--task", malformed.options.taskId,
+        "--role", malformed.options.role,
+        "--thread", malformed.options.threadId,
+        "--host", malformed.options.hostId,
+        "--attempt", "1",
+        "--event-id", malformed.options.registrationEventId,
+        "--bootstrap-capability-file",
+        String(malformed.initialized.bootstrap_capability_file),
+        "--probe-observation-receipt", malformed.receiptFile,
+        "--probe-observation-receipt-sha256",
+        fileSha256(malformed.receiptFile),
+        "--probe-observation-plan", malformed.planFile,
+        "--probe-observation-plan-sha256",
+        malformed.options.probeObservationPlanSha256,
+        "--probe-observation-stable-id",
+        malformed.options.probeObservationStableId,
+        "--probe-observation-challenge",
+        malformed.options.probeObservationChallenge,
+        "--json",
+      ],
+      {
+        GOAL_CONTROL_DIR: malformed.repository.controlDir,
+        GOAL_CONTROL_TEST_MODE: "1",
+      },
+    );
+    expect(malformedResult.status).toBe(2);
+    expect(malformedResult.stdout).toBe("");
+    expect(malformedResult.stderr).not.toContain(malformedSecret);
+    expect(ordinaryFileSnapshot(malformed.repository.controlDir))
+      .toEqual(beforeMalformed);
   });
 
   test("binds odd-generation retry to the exact trusted input inode", () => {
@@ -3307,6 +3452,254 @@ describe("sealed probe observation receipt", () => {
     expect(runGoalctlProcess(repository.root, prepareArgs).status).toBe(2);
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeRepeatedConflict);
+  });
+
+  test("rejects task, control, and cross-task event namespace reuse before identity generation", () => {
+    const setup = (
+      twoTasks = false,
+    ): {
+      repository: ReturnType<typeof integrationRepository>;
+      initialized: Record<string, any>;
+      artifacts: string;
+      foreman: Record<string, any>;
+    } => {
+      const repository = integrationRepository({ twoTasks });
+      process.env.GOAL_CONTROL_DIR = repository.controlDir;
+      process.env.GOAL_CONTROL_TEST_MODE = "1";
+      const initialized = goalCommand([
+        "init",
+        "--manifest", repository.manifestFile,
+        "--json",
+      ], repository.root).value;
+      const artifacts = realpathSync(mkdtempSync(
+        path.join(tmpdir(), "goal-role-identity-event-namespace-"),
+      ));
+      roots.push(artifacts);
+      chmodSync(artifacts, 0o700);
+      const foreman = registerControlAuthority(
+        repository,
+        initialized,
+        artifacts,
+        "FOREMAN",
+        null,
+      );
+      return { repository, initialized, artifacts, foreman };
+    };
+    const expectNoProjection = (
+      current: ReturnType<typeof setup>,
+      taskId: string,
+      before: Record<string, string>,
+    ): void => {
+      const status = goalCommand([
+        "status",
+        "--goal", "goal-receipt-integration",
+        "--json",
+      ], current.repository.root).value;
+      const actions = goalCommand([
+        "actions",
+        "--goal", "goal-receipt-integration",
+        "--task", taskId,
+        "--json",
+      ], current.repository.root).value;
+      expect(status.tasks[taskId])
+        .not.toHaveProperty("role_identity_intent");
+      expect(actions).not.toHaveProperty("role_identity_intent");
+      expect(ordinaryFileSnapshot(current.repository.controlDir))
+        .toEqual(before);
+    };
+    const rejectPrepare = (
+      current: ReturnType<typeof setup>,
+      operationId: string,
+      taskId: string,
+      role: "FOREMAN" | "CAPTAIN" = "CAPTAIN",
+    ): void => {
+      const before = ordinaryFileSnapshot(current.repository.controlDir);
+      const exactForemanIdentity = role === "FOREMAN"
+        ? current.foreman.session
+        : null;
+      expect(() => prepareRoleIdentityChallenge(
+        current.repository,
+        current.artifacts,
+        {
+          operationId,
+          taskId,
+          role,
+          threadId: exactForemanIdentity?.thread_id
+            || `actual-${operationId}-thread`,
+          hostId: exactForemanIdentity?.host_id
+            || `actual-${operationId}-host`,
+          sessionId: exactForemanIdentity?.role_identity.session_id
+            || `actual-${operationId}-session`,
+          launchId: null,
+          issuerCapabilityFile:
+            String(current.foreman.actor_capability_file),
+        },
+      )).toThrow(expect.objectContaining({
+        code: "CANARY_OBSERVATION_REPLAY_CONFLICT",
+      }));
+      expect(ordinaryFileSnapshot(current.repository.controlDir))
+        .toEqual(before);
+      expectNoProjection(current, taskId, before);
+      const beforeRegister = ordinaryFileSnapshot(
+        current.repository.controlDir,
+      );
+      expect(() => goalCommand([
+        "register-role",
+        "--goal", "goal-receipt-integration",
+        "--task", taskId,
+        "--role", role,
+        "--thread", exactForemanIdentity?.thread_id
+          || platformUuid(`actual-${operationId}-thread`),
+        "--host", exactForemanIdentity?.host_id
+          || platformUuid(`actual-${operationId}-host`),
+        "--attempt", "1",
+        "--event-id", operationId,
+        "--authorizer-capability-file",
+        String(current.foreman.actor_capability_file),
+        "--json",
+      ], current.repository.root)).toThrow();
+      expect(ordinaryFileSnapshot(current.repository.controlDir))
+        .toEqual(beforeRegister);
+    };
+
+    const taskCollision = setup();
+    submitPublicGoalEvent(
+      taskCollision.repository,
+      taskCollision.artifacts,
+      {
+        eventId: "identity-task-event-collision-1",
+        type: "HEARTBEAT",
+        actorRole: "FOREMAN",
+        actorCapabilityFile:
+          String(taskCollision.foreman.actor_capability_file),
+        payload: {
+          lease_ms: 60_000,
+          status: "active",
+        },
+      },
+    );
+    rejectPrepare(
+      taskCollision,
+      "identity-task-event-collision-1",
+      "TASK-A",
+    );
+
+    const controlCollision = setup();
+    goalCommand([
+      "control",
+      "--goal", "goal-receipt-integration",
+      "--expected-epoch", "0",
+      "--reason", "identity control namespace collision",
+      "--instruction-ref", "test://issue-22/control-collision",
+      "--thread", controlCollision.foreman.session.thread_id,
+      "--actor-capability-file",
+      String(controlCollision.foreman.actor_capability_file),
+      "--event-id", "identity-control-collision-1",
+      "--json",
+    ], controlCollision.repository.root);
+    rejectPrepare(
+      controlCollision,
+      "identity-control-collision-1",
+      "TASK-A",
+    );
+
+    const crossTaskCollision = setup(true);
+    submitPublicGoalEvent(
+      crossTaskCollision.repository,
+      crossTaskCollision.artifacts,
+      {
+        eventId: "identity-cross-task-event-collision-1",
+        type: "HEARTBEAT",
+        actorRole: "FOREMAN",
+        actorCapabilityFile:
+          String(crossTaskCollision.foreman.actor_capability_file),
+        payload: {
+          lease_ms: 60_000,
+          status: "active",
+        },
+      },
+    );
+    rejectPrepare(
+      crossTaskCollision,
+      "identity-cross-task-event-collision-1",
+      "TASK-B",
+      "FOREMAN",
+    );
+
+    const exactRetry = setup();
+    const exact = prepareRoleIdentityChallenge(
+      exactRetry.repository,
+      exactRetry.artifacts,
+      {
+        operationId: "identity-exact-bundle-retry-1",
+        taskId: "TASK-A",
+        role: "CAPTAIN",
+        threadId: "actual-identity-exact-retry-thread",
+        hostId: "actual-identity-exact-retry-host",
+        sessionId: "actual-identity-exact-retry-session",
+        launchId: null,
+        issuerCapabilityFile:
+          String(exactRetry.foreman.actor_capability_file),
+      },
+    );
+    const exactArgs = [
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--event-id", "identity-exact-bundle-retry-1",
+      "--canary-plan-sha256", exact.planEnvelope.canary_plan_sha256,
+      "--issuer-capability-file",
+      String(exactRetry.foreman.actor_capability_file),
+      "--identity-receipt", exact.identityFile,
+      "--identity-receipt-sha256", fileSha256(exact.identityFile),
+      "--json",
+    ];
+    const beforeExactRetry = ordinaryFileSnapshot(
+      exactRetry.repository.controlDir,
+    );
+    expect(goalCommand(exactArgs, exactRetry.repository.root).value)
+      .toEqual(exact.challenge);
+    expect(ordinaryFileSnapshot(exactRetry.repository.controlDir))
+      .toEqual(beforeExactRetry);
+    submitPublicGoalEvent(
+      exactRetry.repository,
+      exactRetry.artifacts,
+      {
+        eventId: "identity-exact-bundle-retry-1",
+        type: "HEARTBEAT",
+        actorRole: "FOREMAN",
+        actorCapabilityFile:
+          String(exactRetry.foreman.actor_capability_file),
+        payload: {
+          lease_ms: 60_000,
+          status: "active",
+        },
+      },
+    );
+    const beforeDefensiveReads = ordinaryFileSnapshot(
+      exactRetry.repository.controlDir,
+    );
+    expectNoProjection(
+      exactRetry,
+      "TASK-A",
+      beforeDefensiveReads,
+    );
+    expect(() => goalCommand([
+      "register-role",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--thread", exact.identity.thread_id,
+      "--host", exact.identity.host_id,
+      "--attempt", "1",
+      "--event-id", "identity-exact-bundle-retry-1",
+      "--authorizer-capability-file",
+      String(exactRetry.foreman.actor_capability_file),
+      "--json",
+    ], exactRetry.repository.root)).toThrow();
+    expect(ordinaryFileSnapshot(exactRetry.repository.controlDir))
+      .toEqual(beforeDefensiveReads);
   });
 
   test("rejects signed-observation binding, authentication, TTL, and replay variants with zero writes", () => {
@@ -3611,6 +4004,7 @@ describe("sealed probe observation receipt", () => {
       p1: ReturnType<typeof advanceLegacyP1>;
     } => {
       const repository = integrationRepository({
+        identityTtlMs: 900_000,
         workerBootstrap: true,
       });
       process.env.GOAL_CONTROL_DIR = repository.controlDir;
@@ -3654,6 +4048,58 @@ describe("sealed probe observation receipt", () => {
         p1,
       };
     };
+
+    for (const role of ["REVIEW", "RECEIPT"] as const) {
+      const premature = setup();
+      const worker = createDetachedWorker(
+        premature.repository,
+        premature.p1.fullHead,
+      );
+      const bootstrap = prepareWorkerBootstrap(
+        premature.repository,
+        premature.p1.worktree,
+        worker,
+        {
+          operationId:
+            `launch-${role.toLowerCase()}-premature-1`,
+          challenge: role === "REVIEW"
+            ? "e5".repeat(32)
+            : "f6".repeat(32),
+          threadId:
+            `actual-${role.toLowerCase()}-premature-thread-1`,
+          hostId:
+            `actual-${role.toLowerCase()}-premature-host-1`,
+          role,
+        },
+      );
+      const before = ordinaryFileSnapshot(
+        premature.repository.controlDir,
+      );
+      expect(() => registerWorkerIdentity(
+        premature.repository,
+        premature.p1.worktree,
+        premature.artifacts,
+        premature.captain,
+        worker,
+        bootstrap,
+        {
+          eventId:
+            `register-${role.toLowerCase()}-premature-1`,
+          threadId:
+            `actual-${role.toLowerCase()}-premature-thread-1`,
+          hostId:
+            `actual-${role.toLowerCase()}-premature-host-1`,
+          attempt: 1,
+          launchId:
+            `launch-${role.toLowerCase()}-premature-1`,
+          role,
+        },
+      )).toThrow(expect.objectContaining({
+        code: "PREMATURE_ROLE_REGISTRATION",
+      }));
+      expect(ordinaryFileSnapshot(premature.repository.controlDir))
+        .toEqual(before);
+    }
 
     const mismatch = setup();
     const mismatchWorkerA = createDetachedWorker(
@@ -3958,6 +4404,12 @@ describe("sealed probe observation receipt", () => {
       `SK${"A7".repeat(16)}`,
       `SG.${"S8".repeat(12)}.${"G9".repeat(12)}`,
       "A".repeat(43),
+      `receipt.${"B".repeat(43)}.json`,
+      `/private/tmp/${"C".repeat(43)}.cap`,
+      `https://example.invalid/worker?api_key=${"D".repeat(24)}`,
+      `https://example.invalid/worker?password=${"E".repeat(24)}`,
+      `-----BEGIN PRIVATE KEY-----${"F".repeat(24)}`,
+      `Authorization: Bearer ${"G".repeat(24)}`,
     ];
     for (const [index, rejected] of rejectedValues.entries()) {
       const operationId = `sensitive-role-identity-${index + 1}`;

@@ -83,19 +83,51 @@ const {
   canaryBootstrapPlan,
   canaryBootstrapPrepare,
 } = require('./canary-bootstrap');
+const {
+  assertNoSensitiveStringLeaves,
+  containsSensitiveStringLeaves,
+} = require('./canary-observation-receipt');
+
+const ROLE_IDENTITY_COMMANDS = new Set([
+  'prepare-probe-observation-challenge',
+  'recover-expired-foreman',
+  'refresh-probe-observation',
+  'register-role',
+]);
+const ROLE_IDENTITY_CAPABILITY_OPTIONS = new Set([
+  '--actor-capability-file',
+  '--authorizer-capability-file',
+  '--bootstrap-capability-file',
+  '--foreman-recovery-capability-file',
+  '--issuer-capability-file',
+]);
+
+function assertNoSensitiveRoleIdentityArguments(argv) {
+  if (!ROLE_IDENTITY_COMMANDS.has(argv[0])) return;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (
+      index > 0
+        && ROLE_IDENTITY_CAPABILITY_OPTIONS.has(argv[index - 1])
+    ) {
+      continue;
+    }
+    assertNoSensitiveStringLeaves(token);
+  }
+}
 
 function readEvent(file) {
   if (file !== '-') return readJson(file, 'event file');
   const body = fs.readFileSync(0, 'utf8');
   try {
     return JSON.parse(body);
-  } catch (error) {
-    throw new ControlError('INVALID_JSON', `stdin event 不是合法 JSON: ${error.message}`);
+  } catch {
+    throw new ControlError('INVALID_JSON', 'stdin event 不是合法 JSON');
   }
 }
 
 function validateRole(role) {
-  assertControl(ROLES.includes(role), 'INVALID_ROLE', `未知 role: ${role}`);
+  assertControl(ROLES.includes(role), 'INVALID_ROLE', '未知 role');
   return role;
 }
 
@@ -134,6 +166,7 @@ function goalCommand(
   cwd = process.cwd(),
   invocationCwd = cwd,
 ) {
+  assertNoSensitiveRoleIdentityArguments(argv);
   const args = parseArgs(argv);
   const command = args._[0];
   if (args.help || command === 'help') {
@@ -178,11 +211,7 @@ function goalCommand(
     assertControl(
       args._.length === 1 && unknown.length === 0,
       'INVALID_ARGUMENT',
-      `prepare-probe-observation-challenge 拒绝 caller identity/未知参数${
-        unknown.length > 0
-          ? `: ${unknown.map((key) => `--${key.replace(/_/g, '-')}`).join(', ')}`
-          : ''
-      }`,
+      'prepare-probe-observation-challenge 拒绝 caller identity/未知参数',
     );
     return {
       value: prepareProbeObservationChallenge(cwd, {
@@ -1604,6 +1633,7 @@ function controlErrorCauseCodes(error) {
 
 function runMain(kind, argv) {
   try {
+    assertNoSensitiveRoleIdentityArguments(argv);
     const args = parseArgs(argv);
     const invocationCwd = fs.realpathSync(process.cwd());
     let cwd = invocationCwd;
@@ -1627,9 +1657,19 @@ function runMain(kind, argv) {
       : resourceCommand(argv, cwd);
     printResult(result, argv);
   } catch (error) {
-    const failure = error instanceof ControlError ? error : new ControlError('UNEXPECTED', error.message);
-    process.stderr.write(`${kind}ctl[${failure.code}]: ${failure.message}\n`);
-    if (failure.details) process.stderr.write(`${JSON.stringify(failure.details)}\n`);
+    const failure = error instanceof ControlError
+      ? error
+      : new ControlError('UNEXPECTED', '内部错误');
+    const publicMessage = containsSensitiveStringLeaves(failure.message)
+      ? '请求包含敏感数据，已拒绝'
+      : failure.message;
+    process.stderr.write(`${kind}ctl[${failure.code}]: ${publicMessage}\n`);
+    if (
+      failure.details
+        && !containsSensitiveStringLeaves(failure.details)
+    ) {
+      process.stderr.write(`${JSON.stringify(failure.details)}\n`);
+    }
     const causeCodes = controlErrorCauseCodes(failure);
     if (causeCodes.length > 0) {
       process.stderr.write(`${JSON.stringify({ caused_by_codes: causeCodes })}\n`);

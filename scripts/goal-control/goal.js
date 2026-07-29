@@ -130,6 +130,7 @@ const {
   platformOpaqueId,
   publicRoleIdentityIntent,
   roleIdentitySemanticSlotSha256,
+  validateLegacyRoleIdentityIntent,
   validateRoleIdentityIntent,
   validateRoleIdentityObservation,
   verifyRoleIdentityObservationRecord,
@@ -991,7 +992,7 @@ function roleIdentityInventory(paths) {
     }
     if (/^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name)) {
       const file = path.join(paths.roleIdentityIntents, name);
-      const intent = validateRoleIdentityIntent(
+      const intent = validateLegacyRoleIdentityIntent(
         readPrivateRoleIdentityJson(
           file,
           'legacy role identity intent',
@@ -1007,7 +1008,10 @@ function roleIdentityInventory(paths) {
         file,
         operation_id: intent.operation_id,
         semantic_slot_sha256:
-          roleIdentitySemanticSlotSha256(intent),
+          roleIdentitySemanticSlotSha256(
+            intent,
+            { allowLegacy: true },
+          ),
         intent,
         bundle: null,
       });
@@ -1046,7 +1050,7 @@ function readRoleIdentityIntent(paths, operationId) {
   if (bundle) return bundle.intent;
   const file = roleIdentityIntentFile(paths, operationId);
   if (!fs.existsSync(file)) return null;
-  return validateRoleIdentityIntent(
+  return validateLegacyRoleIdentityIntent(
     readPrivateRoleIdentityJson(file, 'legacy role identity intent'),
   );
 }
@@ -1086,6 +1090,25 @@ function controllerDerivedRoleAttempt(loaded, taskId, role) {
       .map((session) => session.attempt),
   ].filter((attempt) => Number.isSafeInteger(attempt) && attempt > 0);
   return attempts.length === 0 ? 1 : Math.max(...attempts) + 1;
+}
+
+function workerRoleIdentityRegistrationEligible(state, role) {
+  if (role === 'DEV') {
+    return state.phase === 'P1_COMMITTED'
+      || state.phase === 'RECEIPT_FAILED'
+      || (
+        state.phase === 'DEV_ACTIVE'
+          && state.recovery
+          && state.recovery.role === 'DEV'
+      );
+  }
+  if (role === 'REVIEW') {
+    return ['DEV_READY', 'RECEIPT_FAILED'].includes(state.phase);
+  }
+  if (role === 'RECEIPT') {
+    return state.phase === 'REVIEW_PASS';
+  }
+  return true;
 }
 
 function challengeIssuerAuthority(loaded, options, supplied) {
@@ -1381,6 +1404,13 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     );
   }
   if (['DEV', 'REVIEW', 'RECEIPT'].includes(role)) {
+    if (authority.kind !== 'CURRENT_SESSION') {
+      assertControl(
+        workerRoleIdentityRegistrationEligible(state, role),
+        'PREMATURE_ROLE_REGISTRATION',
+        `${role} identity producer 不能在当前 phase 提前发布`,
+      );
+    }
     assertControl(
       observation.launch_id,
       'LAUNCH_ID_REQUIRED',
@@ -1467,6 +1497,7 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
   const intentUnsigned = {
     schema_version: 1,
     kind: 'ROLE_IDENTITY_INTENT',
+    protocol: 'goalctl-role-identity-intent-v2',
     operation_id: operationId,
     semantic_slot_sha256: semanticSlotSha256,
     goal_id: options.goalId,
@@ -1606,6 +1637,46 @@ function prepareProbeObservationChallenge(cwd, options) {
   let trustedInputs = null;
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
+  let readOnlyExactRetry = null;
+  const challengeRequest = () => {
+    const {
+      loaded,
+      observation,
+      authority,
+      intent,
+    } = preparedIdentity;
+    const eventId = safeId(
+      options.eventId,
+      'registration event_id',
+    );
+    const planSha256 = normalizeHash(
+      options.planSha256,
+      'canary plan sha256',
+    );
+    const hostAttestation =
+      loaded.manifest.probe_observation_receipts.host_attestation;
+    return {
+      schema_version: 1,
+      kind: 'PROBE_OBSERVATION_CHALLENGE',
+      goal_id: options.goalId,
+      task_id: options.taskId,
+      role: options.role,
+      thread_id: observation.thread_id,
+      host_id: observation.host_id,
+      attempt: intent.attempt,
+      registration_event_id: eventId,
+      canary_plan_sha256: planSha256,
+      producer_namespace:
+        process.env.GOAL_CONTROL_TEST_MODE === '1'
+            ? 'ISOLATED_TEST_FAKE'
+            : 'HOST_ADAPTER',
+      issuer_capability_sha256: authority.capability_sha256,
+      attestation_algorithm: hostAttestation.algorithm,
+      attestation_key_id: hostAttestation.key_id,
+      attestation_public_key_sha256:
+        hostAttestation.public_key_sha256,
+    };
+  };
   return withLock(root, () => {
     const {
       loaded,
@@ -1623,12 +1694,6 @@ function prepareProbeObservationChallenge(cwd, options) {
       'INVALID_ROLE',
       `未知 role ${role}`,
     );
-    const hostId = observation.host_id;
-    const attempt = intent.attempt;
-    const planSha256 = normalizeHash(
-      options.planSha256,
-      'canary plan sha256',
-    );
     if (!fs.existsSync(loaded.paths.probeObservationChallenges)) {
       ensureDir(loaded.paths.probeObservationChallenges);
     }
@@ -1642,29 +1707,7 @@ function prepareProbeObservationChallenge(cwd, options) {
       loaded.paths,
       intent.semantic_slot_sha256,
     );
-    const hostAttestation =
-      loaded.manifest.probe_observation_receipts.host_attestation;
-    const request = {
-      schema_version: 1,
-      kind: 'PROBE_OBSERVATION_CHALLENGE',
-      goal_id: options.goalId,
-      task_id: options.taskId,
-      role,
-      thread_id: observation.thread_id,
-      host_id: hostId,
-      attempt,
-      registration_event_id: eventId,
-      canary_plan_sha256: planSha256,
-      producer_namespace:
-        process.env.GOAL_CONTROL_TEST_MODE === '1'
-            ? 'ISOLATED_TEST_FAKE'
-            : 'HOST_ADAPTER',
-      issuer_capability_sha256: authority.capability_sha256,
-      attestation_algorithm: hostAttestation.algorithm,
-      attestation_key_id: hostAttestation.key_id,
-      attestation_public_key_sha256:
-        hostAttestation.public_key_sha256,
-    };
+    const request = challengeRequest();
     if (fs.existsSync(bundleFile)) {
       const existingBundle = validateRoleIdentityBundle(
         readPrivateRoleIdentityJson(
@@ -1844,16 +1887,51 @@ function prepareProbeObservationChallenge(cwd, options) {
           'CANARY_OBSERVATION_REPLAY_CONFLICT',
           'legacy role identity slot 禁止由新 operation 或新 protocol 覆盖',
         );
+        if (transaction.mode === 'FRESH') {
+          const request = challengeRequest();
+          assertControl(
+            Object.entries(request).every(
+              ([key, value]) => existing.bundle.challenge[key] === value,
+            ),
+            'CANARY_OBSERVATION_REPLAY_CONFLICT',
+            'challenge stable event 已绑定不同 request',
+          );
+          readOnlyExactRetry = publicProbeObservationChallenge(
+            existing.bundle.challenge,
+          );
+        }
         oddRecoveryAuthorized = isOddTransactionRetry(
           transaction.mode,
         );
-      } else if (isOddTransactionRetry(transaction.mode)) {
-        pristineOddRecoveryAuthorized = true;
+      } else {
+        assertControl(
+          goalEventIdOccurrences(
+            preparedIdentity.loaded,
+            operationId,
+          ).length === 0
+            && goalControlEventOccurrences(
+              preparedIdentity.loaded,
+              operationId,
+            ).length === 0,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'role identity operation_id 已被 accepted event namespace 占用',
+        );
+        if (isOddTransactionRetry(transaction.mode)) {
+          pristineOddRecoveryAuthorized = true;
+        }
       }
     },
     authorizeOddRecovery: () => oddRecoveryAuthorized,
     authorizePristineOddRecovery: () =>
       pristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyExactRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyExactRetry,
+        }
+    ),
     afterGenerationBeforeCallback: generationBoundaryFaultHook(
       cwd,
       'GOAL_CONTROL_TEST_FAULT_AFTER_ROLE_IDENTITY_GENERATION',
@@ -4124,7 +4202,7 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
           'role identity atomic bundle',
         ),
       ).intent
-      : validateRoleIdentityIntent(
+      : validateLegacyRoleIdentityIntent(
         readPrivateRoleIdentityJson(
           file,
           'legacy role identity intent',
@@ -4150,11 +4228,24 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
       continue;
     }
     const state = loaded.snapshot.tasks[taskId];
+    if (
+      ['DEV', 'REVIEW', 'RECEIPT'].includes(intent.role)
+        && !workerRoleIdentityRegistrationEligible(
+          state,
+          intent.role,
+        )
+    ) {
+      continue;
+    }
     const accepted = goalEventIdOccurrences(
       loaded,
       intent.operation_id,
     );
-    if (accepted.length > 0) continue;
+    const acceptedControl = goalControlEventOccurrences(
+      loaded,
+      intent.operation_id,
+    );
+    if (accepted.length > 0 || acceptedControl.length > 0) continue;
     if (
       intent.state_revision !== state.state_revision
         || intent.control_epoch !== loaded.control.epoch
@@ -4176,7 +4267,10 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
     ) {
       continue;
     }
-    candidates.push(intent);
+    candidates.push({
+      intent,
+      allowLegacy: !isBundle,
+    });
   }
   assertControl(
     candidates.length <= 1,
@@ -4185,7 +4279,10 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
   );
   return candidates.length === 0
     ? null
-    : publicRoleIdentityIntent(candidates[0]);
+    : publicRoleIdentityIntent(
+      candidates[0].intent,
+      { allowLegacy: candidates[0].allowLegacy },
+    );
 }
 
 function registrationRoleIdentityBinding(
@@ -14551,6 +14648,18 @@ function registerRole(cwd, options) {
           prevalidatedState,
           options,
           );
+        const prevalidatedProbeObservation =
+          registrationProbeObservationBinding(
+            prevalidated,
+            prevalidatedState,
+            {
+              ...options,
+              acceptanceTime: transaction.transaction_started_at,
+              persistEvidence: false,
+            },
+            stableRegistrationEventId,
+            registrationBundleCapture,
+          );
         if (
           goalEventIdOccurrences(
             prevalidated,
@@ -14563,7 +14672,7 @@ function registerRole(cwd, options) {
             options,
             stableRegistrationEventId,
             prevalidatedWorkerBootstrap,
-            null,
+            prevalidatedProbeObservation,
             registrationBundleCapture,
           );
         }

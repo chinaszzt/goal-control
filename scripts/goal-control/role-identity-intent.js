@@ -15,6 +15,7 @@ const {
 
 const OBSERVATION_KIND = 'GOALCTL_HOST_ROLE_IDENTITY_OBSERVATION_V1';
 const INTENT_KIND = 'ROLE_IDENTITY_INTENT';
+const INTENT_PROTOCOL_V2 = 'goalctl-role-identity-intent-v2';
 const ROLES = new Set(['FOREMAN', 'CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT']);
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const RFC3339_UTC_MILLIS_RE =
@@ -349,15 +350,9 @@ function validateRoleIdentityObservation(options) {
   };
 }
 
-function validateRoleIdentityIntent(value) {
+function validateRoleIdentityIntent(value, options = {}) {
   assertNoSensitiveStringLeaves(value);
-  const legacy = !Object.prototype.hasOwnProperty.call(
-    value,
-    'semantic_slot_sha256',
-  ) && !Object.prototype.hasOwnProperty.call(
-    value,
-    'worker_bootstrap',
-  );
+  const legacy = options.allowLegacy === true;
   const keys = [
     'schema_version',
     'kind',
@@ -383,6 +378,7 @@ function validateRoleIdentityIntent(value) {
   ];
   if (!legacy) {
     keys.push(
+      'protocol',
       'semantic_slot_sha256',
       'worker_bootstrap',
       'worker_bootstrap_authority',
@@ -474,6 +470,11 @@ function validateRoleIdentityIntent(value) {
   assertControl(
     value.schema_version === 1
       && value.kind === INTENT_KIND
+      && (
+        legacy
+          ? !Object.prototype.hasOwnProperty.call(value, 'protocol')
+          : value.protocol === INTENT_PROTOCOL_V2
+      )
       && (
         legacy
           || (
@@ -738,8 +739,12 @@ function validateRoleIdentityIntent(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function roleIdentitySemanticSlotSha256(value) {
-  const intent = validateRoleIdentityIntent(value);
+function validateLegacyRoleIdentityIntent(value) {
+  return validateRoleIdentityIntent(value, { allowLegacy: true });
+}
+
+function roleIdentitySemanticSlotSha256(value, options = {}) {
+  const intent = validateRoleIdentityIntent(value, options);
   if (intent.semantic_slot_sha256) {
     return intent.semantic_slot_sha256;
   }
@@ -759,8 +764,8 @@ function roleIdentitySemanticSlotSha256(value) {
   });
 }
 
-function publicRoleIdentityIntent(value) {
-  const intent = validateRoleIdentityIntent(value);
+function publicRoleIdentityIntent(value, options = {}) {
+  const intent = validateRoleIdentityIntent(value, options);
   return {
     schema_version: 1,
     kind: intent.kind,
@@ -800,8 +805,10 @@ function publicRoleIdentityIntent(value) {
 
 module.exports = {
   INTENT_KIND,
+  INTENT_PROTOCOL_V2,
   OBSERVATION_KIND,
   publicRoleIdentityIntent,
+  validateLegacyRoleIdentityIntent,
   validateRoleIdentityIntent,
   validateRoleIdentityObservation,
   validateRoleIdentityObservationStructure,

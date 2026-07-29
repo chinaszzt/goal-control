@@ -1462,7 +1462,9 @@ function validateEvent(event) {
         'REGISTER_ROLE.payload.role_identity.launch_id',
       );
     }
-    assertNoSensitiveStringLeaves(payload.role_identity);
+    assertNoSensitiveStringLeaves(
+      v2Identity ? payload : payload.role_identity,
+    );
     if (event.type === 'REGISTER_ROLE') {
       const workerRole = ['DEV', 'REVIEW', 'RECEIPT']
         .includes(payload.role);

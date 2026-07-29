@@ -30,6 +30,7 @@ const Ajv2020 = nodeRequire("ajv/dist/2020").default as new (
   ) => (value: unknown) => boolean;
 };
 const {
+  validateLegacyRoleIdentityIntent,
   validateRoleIdentityIntent,
   validateRoleIdentityObservationStructure,
 } = nodeRequire(
@@ -41,6 +42,9 @@ const {
   ),
 ) as {
   validateRoleIdentityIntent: (
+    value: Record<string, any>,
+  ) => Record<string, any>;
+  validateLegacyRoleIdentityIntent: (
     value: Record<string, any>,
   ) => Record<string, any>;
   validateRoleIdentityObservationStructure: (
@@ -264,6 +268,7 @@ describe("goal-control machine contract schemas", () => {
       },
     });
     expect(intent.required).toEqual(expect.arrayContaining([
+      "protocol",
       "operation_id",
       "goal_id",
       "task_id",
@@ -340,6 +345,7 @@ describe("goal-control machine contract schemas", () => {
     const intentCore = {
       schema_version: 1,
       kind: "ROLE_IDENTITY_INTENT",
+      protocol: "goalctl-role-identity-intent-v2",
       operation_id: observation.operation_id,
       semantic_slot_sha256: `sha256:${"0".repeat(64)}`,
       goal_id: observation.goal_id,
@@ -607,6 +613,15 @@ describe("goal-control machine contract schemas", () => {
       runtimeIntent,
       sealIntent({
         ...intentCore,
+        operation_id: `receipt.${"R".repeat(43)}.json`,
+      }),
+      false,
+    );
+    parity(
+      schemaIntent,
+      runtimeIntent,
+      sealIntent({
+        ...intentCore,
         thread_id: "captain-1",
       }),
       false,
@@ -628,6 +643,20 @@ describe("goal-control machine contract schemas", () => {
       sealIntent(missingIntent),
       false,
     );
+    const legacyIntent = sealIntent(intentCore);
+    delete legacyIntent.protocol;
+    delete legacyIntent.semantic_slot_sha256;
+    delete legacyIntent.worker_bootstrap;
+    delete legacyIntent.worker_bootstrap_authority;
+    delete legacyIntent.identity_observation.signed_record;
+    delete legacyIntent.issuer_authority
+      .capability_file_identity_sha256;
+    delete legacyIntent.intent_sha256;
+    legacyIntent.intent_sha256 = hashObject(legacyIntent);
+    expect(schemaIntent(legacyIntent)).toBe(false);
+    expect(runtimeIntent(legacyIntent)).toBe(false);
+    expect(() => validateLegacyRoleIdentityIntent(legacyIntent))
+      .not.toThrow();
 
     const bundleSchema = readJson(
       "scripts/goal-control/schemas/role-identity-bundle.schema.json",
@@ -645,6 +674,9 @@ describe("goal-control machine contract schemas", () => {
         return false;
       }
     };
+    const compositeBundle = (
+      value: Record<string, any>,
+    ): boolean => schemaBundle(value) && runtimeBundle(value);
     const bundleIntent = sealIntent(intentCore);
     const challengeUnsigned = {
       schema_version: 1,
@@ -686,8 +718,7 @@ describe("goal-control machine contract schemas", () => {
       ...bundleUnsigned,
       bundle_sha256: hashObject(bundleUnsigned),
     };
-    expect(schemaBundle(bundle)).toBe(true);
-    expect(runtimeBundle(bundle)).toBe(true);
+    expect(compositeBundle(bundle)).toBe(true);
     const bundleExtra = {
       ...structuredClone(bundle),
       nested_extra: { arbitrary: "rejected" },
@@ -708,10 +739,18 @@ describe("goal-control machine contract schemas", () => {
       "019fabbe-3b38-7a23-8d8f-8c392bced03b";
     expect(schemaBundle(bundleCrossField)).toBe(true);
     expect(runtimeBundle(bundleCrossField)).toBe(false);
+    expect(compositeBundle(bundleCrossField)).toBe(false);
     const bundleBadSeal = structuredClone(bundle);
     bundleBadSeal.bundle_sha256 = `sha256:${"f".repeat(64)}`;
     expect(schemaBundle(bundleBadSeal)).toBe(true);
     expect(runtimeBundle(bundleBadSeal)).toBe(false);
+    expect(compositeBundle(bundleBadSeal)).toBe(false);
+    const bundleBadIntentSeal = structuredClone(bundle);
+    bundleBadIntentSeal.intent.intent_sha256 =
+      `sha256:${"e".repeat(64)}`;
+    expect(schemaBundle(bundleBadIntentSeal)).toBe(true);
+    expect(runtimeBundle(bundleBadIntentSeal)).toBe(false);
+    expect(compositeBundle(bundleBadIntentSeal)).toBe(false);
   });
 
   it("executes the checked-in event role identity binding in Ajv/runtime parity", () => {
@@ -962,6 +1001,53 @@ describe("goal-control machine contract schemas", () => {
       ...identityV2,
       extra_authority: `sha256:${"d".repeat(64)}`,
     }), false);
+
+    const unsafeStateRevision = withIdentity(identityV2);
+    unsafeStateRevision.expected_state_revision =
+      Number.MAX_SAFE_INTEGER + 1;
+    parity(unsafeStateRevision, false);
+    const unsafeControlEpoch = withIdentity(identityV2);
+    unsafeControlEpoch.control_epoch = Number.MAX_SAFE_INTEGER + 1;
+    parity(unsafeControlEpoch, false);
+    const unsafePacketRevision = withIdentity(identityV2);
+    unsafePacketRevision.packet.revision =
+      Number.MAX_SAFE_INTEGER + 1;
+    parity(unsafePacketRevision, false);
+
+    const sessionAuthority = withIdentity(identityV2);
+    sessionAuthority.payload.authorized_by = {
+      role: "FOREMAN",
+      thread_id: PLATFORM_THREAD,
+      host_id: PLATFORM_HOST,
+      attempt: 1,
+    };
+    sessionAuthority.payload.role_identity
+      .registration_authorized_by_sha256 = hashObject(
+        sessionAuthority.payload.authorized_by,
+      );
+    parity(sessionAuthority, true);
+    const invalidSessionAuthority = structuredClone(sessionAuthority);
+    invalidSessionAuthority.payload.authorized_by.thread_id =
+      "foreman-thread-not-platform-attested";
+    invalidSessionAuthority.payload.role_identity
+      .registration_authorized_by_sha256 = hashObject(
+        invalidSessionAuthority.payload.authorized_by,
+      );
+    parity(invalidSessionAuthority, false);
+
+    const sensitiveControllerId = withIdentity({
+      ...identityV2,
+      operation_id: `receipt.${"C".repeat(43)}.json`,
+    });
+    parity(sensitiveControllerId, false);
+    const sensitiveReceiptPath = withIdentity(identityV2);
+    sensitiveReceiptPath.payload.probe_observation.receipt_file =
+      `/private/tmp/${"D".repeat(43)}.cap`;
+    parity(sensitiveReceiptPath, false);
+    const credentialPlanUrl = withIdentity(identityV2);
+    credentialPlanUrl.payload.probe_observation.plan_file =
+      `https://example.invalid/plan?api_key=${"E".repeat(24)}`;
+    parity(credentialPlanUrl, false);
   });
 
   it("defines the canonical sealed probe observation receipt contract", () => {

@@ -72,7 +72,7 @@
             },
             {
               "not": {
-                "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+              "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
               }
             }
           ]
@@ -115,11 +115,13 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
         {
-          "not": { "pattern": "^[A-Za-z0-9_-]{43}$" }
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])"
+          }
         },
         {
           "not": {
-            "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
           }
         },
         {
@@ -134,7 +136,7 @@
         },
         {
           "not": {
-            "pattern": "^(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})$"
+            "pattern": "(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
           }
         }
       ]

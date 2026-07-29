@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "kind",
+    "protocol",
     "operation_id",
     "semantic_slot_sha256",
     "goal_id",
@@ -33,6 +34,7 @@
   "properties": {
     "schema_version": { "const": 1 },
     "kind": { "const": "ROLE_IDENTITY_INTENT" },
+    "protocol": { "const": "goalctl-role-identity-intent-v2" },
     "operation_id": { "$ref": "#/$defs/safeId" },
     "semantic_slot_sha256": { "$ref": "#/$defs/sha256" },
     "goal_id": { "$ref": "#/$defs/safeId" },
@@ -461,11 +463,13 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
         {
-          "not": { "pattern": "^[A-Za-z0-9_-]{43}$" }
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])"
+          }
         },
         {
           "not": {
-            "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
           }
         },
         {
@@ -480,7 +484,7 @@
         },
         {
           "not": {
-            "pattern": "^(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})$"
+            "pattern": "(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
           }
         }
       ]
@@ -552,7 +556,10 @@
         "branch": {
           "type": "string",
           "pattern": "^codex/.+",
-          "maxLength": 300
+          "maxLength": 300,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "canary_policy": {
           "type": "object",
@@ -562,7 +569,10 @@
             "path": {
               "type": "string",
               "minLength": 1,
-              "not": { "pattern": "^/" }
+              "not": { "pattern": "^/" },
+              "allOf": [
+                { "$ref": "#/$defs/nonSensitiveString" }
+              ]
             },
             "sha256": { "$ref": "#/$defs/sha256" }
           }
@@ -570,9 +580,52 @@
         "binding_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
+    "nonSensitiveString": {
+      "type": "string",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9])(?:(?:[sS][kK]|[pP][kK]|[rR][kK]|[aA][pP][iI]|[aA][uU][tT][hH]|[tT][oO][kK][eE][nN]|[sS][eE][cC][rR][eE][tT]|[bB][eE][aA][rR][eE][rR]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[aA][cC][cC][eE][sS][sS][_-]?[kK][eE][yY])[_-](?:[lL][iI][vV][eE]|[tT][eE][sS][tT]|[pP][rR][oO][dD]|[pP][rR][oO][jJ]|[kK][eE][yY])?[_-]?[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[aA][pP][iI][_-]?[kK][eE][yY]|[pP][aA][sS][sS](?:[wW][oO][rR][dD]|[wW][dD])|[cC][lL][iI][eE][nN][tT][_-]?[sS][eE][cC][rR][eE][tT]|[pP][rR][iI][vV][aA][tT][eE][_-]?[kK][eE][yY]|[aA][cC][cC][eE][sS][sS][_-]?(?:[tT][oO][kK][eE][nN]|[kK][eE][yY])|[tT][oO][kK][eE][nN]|[aA][uU][tT][hH](?:[oO][rR][iI][zZ][aA][tT][iI][oO][nN])?|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL])\\s*[:=]\\s*[^\\s\"'&]{4,}"
+          }
+        },
+        {
+          "not": {
+            "pattern": "-----BEGIN (?:[A-Za-z0-9 ]+ )?PRIVATE KEY-----"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[bB][aA][sS][iI][cC]|[bB][eE][aA][rR][eE][rR])\\s+[A-Za-z0-9._~+/-]+=*"
+          }
+        },
+        {
+          "not": {
+            "pattern": "https?://(?:[^/\\s@]+@|[^\\s\"']+[?&](?:[aA][cC][cC][eE][sS][sS][_-]?[tT][oO][kK][eE][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][aA][sS][sS](?:[wW][oO][rR][dD]|[wW][dD])|[cC][lL][iI][eE][nN][tT][_-]?[sS][eE][cC][rR][eE][tT]|[pP][rR][iI][vV][aA][tT][eE][_-]?[kK][eE][yY]|[tT][oO][kK][eE][nN]|[kK][eE][yY]|[sS][eE][cC][rR][eE][tT]|[aA][uU][tT][hH](?:[oO][rR][iI][zZ][aA][tT][iI][oO][nN])?|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL])=)"
+          }
+        }
+      ]
+    },
     "absolutePath": {
       "type": "string",
-      "pattern": "^/"
+      "pattern": "^/",
+      "allOf": [
+        { "$ref": "#/$defs/nonSensitiveString" }
+      ]
     }
   }
 }

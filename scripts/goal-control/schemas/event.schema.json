@@ -88,11 +88,13 @@
     },
     "expected_state_revision": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "control_epoch": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "packet": {
       "$ref": "#/$defs/packetBinding"
@@ -281,7 +283,14 @@
         "role_identity": { "$ref": "#/$defs/roleIdentityBinding" },
         "previous_binding_sha256": { "$ref": "#/$defs/sha256" },
         "capability_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "capability_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "capability_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
+        },
         "authorized_by": { "$ref": "#/$defs/registrationAuthorizedBy" },
         "goal_foreman_projection": { "type": "boolean" },
         "projected_lease_until": { "$ref": "#/$defs/dateTime" },
@@ -482,7 +491,12 @@
       "then": {
         "properties": {
           "payload": {
-            "required": ["probe_observation", "role_identity"]
+            "required": ["probe_observation", "role_identity"],
+            "properties": {
+              "authorized_by": {
+                "$ref": "#/$defs/registrationAuthorizedByV2"
+              }
+            }
           }
         }
       }
@@ -599,11 +613,13 @@
       "maxLength": 200,
       "allOf": [
         {
-          "not": { "pattern": "^[A-Za-z0-9_-]{43}$" }
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])"
+          }
         },
         {
           "not": {
-            "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
           }
         },
         {
@@ -613,7 +629,7 @@
         },
         {
           "not": {
-            "pattern": "^(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})$"
+            "pattern": "(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
           }
         }
       ]
@@ -671,7 +687,8 @@
       "properties": {
         "revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "sha256": {
           "$ref": "#/$defs/sha256"
@@ -690,7 +707,10 @@
       "type": "string",
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
       "minLength": 1,
-      "maxLength": 500
+      "maxLength": 500,
+      "allOf": [
+        { "$ref": "#/$defs/nonSensitiveString" }
+      ]
     },
     "dateTime": {
       "type": "string",
@@ -754,7 +774,10 @@
         "receipt_file": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "receipt_sha256": {
           "$ref": "#/$defs/sha256"
@@ -781,17 +804,26 @@
         "worktree": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "git_dir": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "common_git_dir": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "head": {
           "$ref": "#/$defs/fullSha"
@@ -799,7 +831,10 @@
         "branch": {
           "type": "string",
           "pattern": "^codex/.+",
-          "maxLength": 300
+          "maxLength": 300,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
         },
         "canary_policy": {
           "type": "object",
@@ -870,9 +905,23 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{86}$"
         },
-        "plan_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "plan_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
+        },
         "plan_file_sha256": { "$ref": "#/$defs/sha256" },
-        "receipt_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "receipt_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "allOf": [
+            { "$ref": "#/$defs/nonSensitiveString" }
+          ]
+        },
         "receipt_sha256": { "$ref": "#/$defs/sha256" },
         "canary_plan_sha256": { "$ref": "#/$defs/sha256" },
         "stable_id": { "$ref": "#/$defs/safeId" },
@@ -1061,7 +1110,10 @@
             "capability_file": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 2000
+              "maxLength": 2000,
+              "allOf": [
+                { "$ref": "#/$defs/nonSensitiveString" }
+              ]
             }
           }
         },
@@ -1086,6 +1138,81 @@
               "minimum": 1,
               "maximum": 9007199254740991
             }
+          }
+        }
+      ]
+    },
+    "registrationAuthorizedByV2": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "capability_file"],
+          "properties": {
+            "role": { "enum": ["BOOTSTRAP", "GOAL_RECOVERY"] },
+            "capability_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "allOf": [
+                { "$ref": "#/$defs/nonSensitiveString" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "thread_id", "host_id", "attempt"],
+          "properties": {
+            "role": { "$ref": "#/$defs/role" },
+            "thread_id": { "$ref": "#/$defs/platformUuid" },
+            "host_id": { "$ref": "#/$defs/platformUuid" },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      ]
+    },
+    "nonSensitiveString": {
+      "type": "string",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9])(?:(?:[sS][kK]|[pP][kK]|[rR][kK]|[aA][pP][iI]|[aA][uU][tT][hH]|[tT][oO][kK][eE][nN]|[sS][eE][cC][rR][eE][tT]|[bB][eE][aA][rR][eE][rR]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[aA][cC][cC][eE][sS][sS][_-]?[kK][eE][yY])[_-](?:[lL][iI][vV][eE]|[tT][eE][sS][tT]|[pP][rR][oO][dD]|[pP][rR][oO][jJ]|[kK][eE][yY])?[_-]?[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[aA][pP][iI][_-]?[kK][eE][yY]|[pP][aA][sS][sS](?:[wW][oO][rR][dD]|[wW][dD])|[cC][lL][iI][eE][nN][tT][_-]?[sS][eE][cC][rR][eE][tT]|[pP][rR][iI][vV][aA][tT][eE][_-]?[kK][eE][yY]|[aA][cC][cC][eE][sS][sS][_-]?(?:[tT][oO][kK][eE][nN]|[kK][eE][yY])|[tT][oO][kK][eE][nN]|[aA][uU][tT][hH](?:[oO][rR][iI][zZ][aA][tT][iI][oO][nN])?|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL])\\s*[:=]\\s*[^\\s\"'&]{4,}"
+          }
+        },
+        {
+          "not": {
+            "pattern": "-----BEGIN (?:[A-Za-z0-9 ]+ )?PRIVATE KEY-----"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:[bB][aA][sS][iI][cC]|[bB][eE][aA][rR][eE][rR])\\s+[A-Za-z0-9._~+/-]+=*"
+          }
+        },
+        {
+          "not": {
+            "pattern": "https?://(?:[^/\\s@]+@|[^\\s\"']+[?&](?:[aA][cC][cC][eE][sS][sS][_-]?[tT][oO][kK][eE][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][aA][sS][sS](?:[wW][oO][rR][dD]|[wW][dD])|[cC][lL][iI][eE][nN][tT][_-]?[sS][eE][cC][rR][eE][tT]|[pP][rR][iI][vV][aA][tT][eE][_-]?[kK][eE][yY]|[tT][oO][kK][eE][nN]|[kK][eE][yY]|[sS][eE][cC][rR][eE][tT]|[aA][uU][tT][hH](?:[oO][rR][iI][zZ][aA][tT][iI][oO][nN])?|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL])=)"
           }
         }
       ]
