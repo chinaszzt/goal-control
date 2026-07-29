@@ -560,6 +560,19 @@ describe("goalctl usability layer", () => {
       const commandHelp = runCli(["scaffold", "--help"], cwd, controlDir);
       expect(commandHelp.code).toBe(0);
       expect(commandHelp.stdout).toContain("goalctl scaffold --spec");
+      const actionsHelp = runCli(
+        ["help", "actions"],
+        cwd,
+        controlDir,
+      );
+      expect(actionsHelp.code).toBe(0);
+      expect(actionsHelp.stdout).toContain(
+        "--task <id> [--role <role> --thread <id>]",
+      );
+      expect(actionsHelp.stdout).toContain("credentialless");
+      expect(actionsHelp.stdout).toContain("role_identity_intent");
+      expect(actionsHelp.stdout).toContain("不写 generation/control tree");
+      expect(actionsHelp.stdout).toContain("--role 与 --thread 必须成对提供");
       const rotationHelp = runCli(
         ["help", "rotate-store-protocol"],
         cwd,

@@ -293,9 +293,9 @@ const GOAL_HELP = Object.freeze({
     safety: '任一 Goal-wide pending registration/root recovery 会冻结整个 batch；task pending operation 令该 task eligible=false。只按 pending_operations.retry 做 exact retry；一般 stable_id_unavailable 时取调用前持久化的原 ID，不得拿 hash 冒充或跳到其它 task；SOURCE_CHECKPOINT 按 retry.command 重放原 snapshot/receipt/DEV capability，不把 request hash 当 CLI ID。',
   },
   actions: {
-    usage: 'goalctl actions [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> --role <role> --thread <id> [--json]',
-    summary: 'zero-write 返回登记角色当前 actions、maintenance_actions、pending_operations、task launch_scope 与该 role session 的 operational_scope。',
-    safety: 'pending_operations 非空时 actions 与 maintenance_actions 均为空，只能完成列出的 exact retry；launch_scope 是当前 launch/action gate，operational_scope 是 session 的 RECOVERY_BLOCKED/PREFLIGHT_ONLY/FULL authority。',
+    usage: 'goalctl actions [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> [--role <role> --thread <id>] [--json]',
+    summary: 'zero-write credentialless 返回 task 合法 actions、maintenance_actions、pending_operations、launch_scope 与可用的 role_identity_intent；可选 exact role+thread 时追加已登记 actor session 的 operational_scope。',
+    safety: 'credentialless 与指定 actor 两种读取都不写 generation/control tree；--role 与 --thread 必须成对提供。pending_operations 非空时 actions 与 maintenance_actions 均为空，只能完成列出的 exact retry；role_identity_intent 只投影 controller-owned authority，launch_scope 是当前 launch/action gate，operational_scope 是 session 的 RECOVERY_BLOCKED/PREFLIGHT_ONLY/FULL authority。',
   },
   resume: {
     usage: 'goalctl resume [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> --role <role> --thread <id> [--json]',
