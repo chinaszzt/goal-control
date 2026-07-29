@@ -622,7 +622,7 @@ function registerPreparedControlIdentity(
   },
 ): Record<string, any> {
   const operationId = prepared.identity.operation_id;
-  const stableId = `canary-observation-${operationId}`;
+  const stableId = `obs-${operationId}`;
   const repositoryHead = loadGoalStateReadOnly(
     repository.root,
     "goal-receipt-integration",
@@ -2722,12 +2722,19 @@ describe("sealed probe observation receipt", () => {
       role: "FOREMAN",
       eventTag: "fresh-v2-marker-positive",
     });
-    const freshMeta = loadGoalStateReadOnly(
+    const freshAuthority = loadGoalStateReadOnly(
       fresh.repository.root,
       fresh.options.goalId,
-      (loaded) => loaded.meta,
+      (loaded) => ({
+        meta: loaded.meta,
+        intentDirectory: loaded.paths.roleIdentityIntents,
+      }),
     );
-    expect(freshMeta.role_identity_protocol_version).toBe(2);
+    expect(freshAuthority.meta.role_identity_protocol_version)
+      .toBe(2);
+    expect(readdirSync(freshAuthority.intentDirectory).some(
+      (name) => name.endsWith(".role-identity-bundle.json"),
+    )).toBe(true);
     expect(goalCommand([
       "actions",
       "--goal", fresh.options.goalId,
@@ -2736,7 +2743,7 @@ describe("sealed probe observation receipt", () => {
     ], fresh.repository.root).value.role_identity_intent)
       .toMatchObject({
         operation_id: fresh.options.registrationEventId,
-        protocol: "goalctl-role-identity-intent-v2",
+        kind: "ROLE_IDENTITY_INTENT",
       });
   });
 
