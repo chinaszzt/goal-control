@@ -1376,7 +1376,7 @@ function integrationRepository(
     base_head: baseHead,
     probe_observation_receipts: {
       protocol: "goalctl-sealed-probe-observation-v1",
-      max_ttl_ms: options.identityTtlMs ?? 120_000,
+      max_ttl_ms: options.identityTtlMs ?? 900_000,
       host_attestation: {
         algorithm: "ED25519",
         key_id: "host-attestation-test-v1",
