@@ -212,7 +212,9 @@ hash；bootstrap 尚在时也验证其 bytes/hash，已消费时则要求 sealed
 control-root 之外生成 manifest-key-signed、private `0600` actual identity observation。
 controller 不接受 caller 写 `--thread/--host/--attempt` 来准备 challenge；同一个
 authenticated upstream transaction 验签 observation、从 current lineage 派生 attempt
-并原子 seal durable identity intent/challenge：
+并把 durable identity intent/challenge 作为一个 schema-v2 atomic bundle seal。每个
+goal/task/role/controller-attempt/lifecycle/launch semantic slot 只有一个 original
+operation；另一 event ID 在 generation 前整树零写拒绝：
 
 ```bash
 gc_goalctl <controlled-worktree> prepare-probe-observation-challenge \
@@ -222,6 +224,30 @@ gc_goalctl <controlled-worktree> prepare-probe-observation-challenge \
   --issuer-capability-file <bootstrap-capability-file> \
   --identity-receipt <absolute-private-host-signed-observation.json> \
   --identity-receipt-sha256 <sha256> --json
+```
+
+worker role 还必须在同一命令携带
+`--worker-bootstrap-receipt/--worker-bootstrap-receipt-sha256/`
+`--worker-bootstrap-operation-id/--worker-bootstrap-challenge/`
+`--worker-bootstrap-identity-plan-sha256/--worker-worktree`。signed observation 的
+`launch_id` 必须等于 controller-owned bootstrap operation ID；controller 会在发布
+bundle 前重验 exact task/role/thread/host/worktree/HEAD/bootstrap binding。缺 launch
+authority、任意/cross bootstrap 或另一个 caller-triggered consumer 写步骤都不成立。
+
+```bash
+gc_goalctl <frozen-goal-worktree> prepare-probe-observation-challenge \
+  --goal <goal-id> --task <task-id> --role DEV \
+  --event-id <stable-dev-registration-id> \
+  --canary-plan-sha256 <sha256> \
+  --issuer-capability-file <captain-actor-capability-file> \
+  --identity-receipt <absolute-private-host-signed-observation.json> \
+  --identity-receipt-sha256 <sha256> \
+  --worker-bootstrap-receipt <canonical-absolute-bootstrap-receipt> \
+  --worker-bootstrap-receipt-sha256 <worker-bootstrap-receipt-sha256> \
+  --worker-bootstrap-operation-id <same-launch-id> \
+  --worker-bootstrap-challenge <same-fresh-64-lowercase-hex> \
+  --worker-bootstrap-identity-plan-sha256 <same-identity-plan-sha256> \
+  --worker-worktree <canonical-absolute-worker-worktree> --json
 ```
 
 只有成功后，credentialless `status/actions` 才会零写投影
@@ -294,7 +320,7 @@ gc_goalctl <controlled-worktree> register-role \
   --task <task-id> \
   --role CAPTAIN \
   --thread <captain-thread-id> \
-  --host local \
+  --host <actual-captain-host-uuid> \
   --attempt 1 \
   --event-id <stable-captain-registration-id> \
   --authorizer-capability-file <foreman-actor-capability-file> \
@@ -727,7 +753,7 @@ gc_goalctl <frozen-goal-worktree> register-role \
   --task <task-id> \
   --role DEV \
   --thread <dev-thread-id> \
-  --host local \
+  --host <actual-worker-host-uuid> \
   --attempt 1 \
   --launch-id <launch-id> \
   --event-id <stable-dev-registration-id> \

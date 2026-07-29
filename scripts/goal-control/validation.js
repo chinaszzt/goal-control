@@ -12,6 +12,13 @@ const {
   realpathWithin,
   safeId,
 } = require('./util');
+const {
+  assertNoSensitiveStringLeaves,
+} = require('./canary-observation-receipt');
+const {
+  controllerOpaqueId,
+  platformOpaqueId,
+} = require('./role-identity-intent');
 
 const ROLES = Object.freeze(['FOREMAN', 'CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT']);
 const HARD_HOLDS = Object.freeze(['BLOCKED_SECURITY', 'BLOCKED_EXTERNAL_FACT', 'ENV_IDENTITY_INCIDENT']);
@@ -1310,6 +1317,9 @@ function validateEvent(event) {
       'INVALID_EVENT',
       'REGISTER_ROLE.payload.role_identity',
     );
+    const identityProtocol = payload.role_identity.protocol;
+    const v2Identity =
+      identityProtocol === 'goalctl-role-identity-intent-v2';
     assertOnlyKeys(
       payload.role_identity,
       [
@@ -1322,13 +1332,37 @@ function validateEvent(event) {
         'attempt',
         'launch_id',
         'identity_observation_receipt_sha256',
+        ...(v2Identity
+          ? [
+            'semantic_slot_sha256',
+            'bundle_sha256',
+            'bundle_file_identity_sha256',
+            'issuer_authority_sha256',
+            'identity_observation_record_sha256',
+            'identity_observation_receipt_file_identity_sha256',
+            'worker_bootstrap_binding_sha256',
+            'worker_bootstrap_authority_sha256',
+            'state_revision',
+            'control_epoch',
+            'packet_revision',
+            'packet_sha256',
+            'base_head',
+            'full_head',
+            'task_cycle',
+            'challenge_record_sha256',
+            'probe_observation_binding_sha256',
+            'registration_authorized_by_sha256',
+          ]
+          : []),
       ],
       'INVALID_EVENT',
       'REGISTER_ROLE.payload.role_identity',
     );
     assertControl(
-      payload.role_identity.protocol
-        === 'goalctl-role-identity-intent-v1'
+      [
+        'goalctl-role-identity-intent-v1',
+        'goalctl-role-identity-intent-v2',
+      ].includes(identityProtocol)
         && /^sha256:[0-9a-f]{64}$/.test(
           payload.role_identity.intent_sha256 || '',
         )
@@ -1341,23 +1375,219 @@ function validateEvent(event) {
       'INVALID_EVENT',
       'REGISTER_ROLE.payload.role_identity binding 非法',
     );
-    for (const [value, label] of [
-      [payload.role_identity.operation_id, 'operation_id'],
-      [payload.role_identity.session_id, 'session_id'],
-      [payload.role_identity.thread_id, 'thread_id'],
-      [payload.role_identity.host_id, 'host_id'],
-    ]) {
-      entityId(
-        value,
-        `REGISTER_ROLE.payload.role_identity.${label}`,
+    if (v2Identity) {
+      assertControl(
+        [
+          payload.role_identity.semantic_slot_sha256,
+          payload.role_identity.bundle_sha256,
+          payload.role_identity.bundle_file_identity_sha256,
+          payload.role_identity.issuer_authority_sha256,
+          payload.role_identity.identity_observation_record_sha256,
+          payload.role_identity
+            .identity_observation_receipt_file_identity_sha256,
+          payload.role_identity.packet_sha256,
+          payload.role_identity.challenge_record_sha256,
+          payload.role_identity.probe_observation_binding_sha256,
+          payload.role_identity.registration_authorized_by_sha256,
+        ].every((value) => /^sha256:[0-9a-f]{64}$/.test(value || ''))
+          && [
+            payload.role_identity.state_revision,
+            payload.role_identity.control_epoch,
+          ].every((value) => (
+            Number.isSafeInteger(value) && value >= 0
+          ))
+          && [
+            payload.role_identity.packet_revision,
+            payload.role_identity.task_cycle,
+          ].every((value) => (
+            Number.isSafeInteger(value) && value > 0
+          ))
+          && /^[0-9a-f]{40}$/.test(
+            payload.role_identity.base_head || '',
+          )
+          && /^[0-9a-f]{40}$/.test(
+            payload.role_identity.full_head || '',
+          )
+          && (
+            payload.role_identity.worker_bootstrap_binding_sha256 === null
+              || /^sha256:[0-9a-f]{64}$/.test(
+                payload.role_identity
+                  .worker_bootstrap_binding_sha256 || '',
+              )
+          )
+          && (
+            payload.role_identity.worker_bootstrap_authority_sha256 === null
+              || /^sha256:[0-9a-f]{64}$/.test(
+                payload.role_identity
+                  .worker_bootstrap_authority_sha256 || '',
+              )
+          ),
         'INVALID_EVENT',
+        'REGISTER_ROLE.payload.role_identity v2 authority binding 非法',
       );
     }
+    controllerOpaqueId(
+      payload.role_identity.operation_id,
+      'REGISTER_ROLE.payload.role_identity.operation_id',
+    );
+    if (v2Identity) {
+      platformOpaqueId(
+        payload.role_identity.session_id,
+        'REGISTER_ROLE.payload.role_identity.session_id',
+      );
+      platformOpaqueId(
+        payload.role_identity.thread_id,
+        'REGISTER_ROLE.payload.role_identity.thread_id',
+      );
+      platformOpaqueId(
+        payload.role_identity.host_id,
+        'REGISTER_ROLE.payload.role_identity.host_id',
+      );
+    } else {
+      for (const [value, label] of [
+        [payload.role_identity.session_id, 'session_id'],
+        [payload.role_identity.thread_id, 'thread_id'],
+        [payload.role_identity.host_id, 'host_id'],
+      ]) {
+        entityId(
+          value,
+          `REGISTER_ROLE.payload.role_identity.${label}`,
+          'INVALID_EVENT',
+        );
+      }
+    }
     if (payload.role_identity.launch_id !== null) {
-      entityId(
+      controllerOpaqueId(
         payload.role_identity.launch_id,
         'REGISTER_ROLE.payload.role_identity.launch_id',
+      );
+    }
+    assertNoSensitiveStringLeaves(payload.role_identity);
+    if (event.type === 'REGISTER_ROLE') {
+      const workerRole = ['DEV', 'REVIEW', 'RECEIPT']
+        .includes(payload.role);
+      const authorizedBy = assertPlainObject(
+        payload.authorized_by,
         'INVALID_EVENT',
+        'REGISTER_ROLE.payload.authorized_by',
+      );
+      if (
+        ['BOOTSTRAP', 'GOAL_RECOVERY'].includes(authorizedBy.role)
+      ) {
+        assertOnlyKeys(
+          authorizedBy,
+          ['role', 'capability_file'],
+          'INVALID_EVENT',
+          'REGISTER_ROLE.payload.authorized_by',
+        );
+        assertControl(
+          typeof authorizedBy.capability_file === 'string'
+            && authorizedBy.capability_file.length > 0,
+          'INVALID_EVENT',
+          'REGISTER_ROLE.payload.authorized_by capability authority 非法',
+        );
+      } else {
+        assertOnlyKeys(
+          authorizedBy,
+          ['role', 'thread_id', 'host_id', 'attempt'],
+          'INVALID_EVENT',
+          'REGISTER_ROLE.payload.authorized_by',
+        );
+        assertControl(
+          ROLES.includes(authorizedBy.role)
+            && Number.isSafeInteger(authorizedBy.attempt)
+            && authorizedBy.attempt > 0,
+          'INVALID_EVENT',
+          'REGISTER_ROLE.payload.authorized_by session authority 非法',
+        );
+        if (v2Identity) {
+          platformOpaqueId(
+            authorizedBy.thread_id,
+            'REGISTER_ROLE.payload.authorized_by.thread_id',
+          );
+          platformOpaqueId(
+            authorizedBy.host_id,
+            'REGISTER_ROLE.payload.authorized_by.host_id',
+          );
+        } else {
+          entityId(
+            authorizedBy.thread_id,
+            'REGISTER_ROLE.payload.authorized_by.thread_id',
+            'INVALID_EVENT',
+          );
+          entityId(
+            authorizedBy.host_id,
+            'REGISTER_ROLE.payload.authorized_by.host_id',
+            'INVALID_EVENT',
+          );
+        }
+      }
+      assertControl(
+        payload.role_identity.thread_id === payload.thread_id
+          && payload.role_identity.host_id === payload.host_id
+          && payload.role_identity.attempt === payload.attempt
+          && payload.role_identity.launch_id === payload.launch_id
+          && (
+            workerRole
+              ? payload.role_identity.launch_id !== null
+              : payload.role_identity.launch_id === null
+          )
+          && (
+            !v2Identity
+              || hashObject(authorizedBy)
+                === payload.role_identity
+                  .registration_authorized_by_sha256
+          )
+          && (
+            !workerRole
+              || !v2Identity
+              || (
+                payload.worker_bootstrap
+                  && payload.worker_bootstrap.binding_sha256
+                    === payload.role_identity
+                      .worker_bootstrap_binding_sha256
+                  && payload.worker_bootstrap.thread
+                    === payload.role_identity.thread_id
+                  && payload.worker_bootstrap.host
+                    === payload.role_identity.host_id
+                  && payload.worker_bootstrap.operation_id
+                    === payload.role_identity.launch_id
+                  && payload.worker_bootstrap.head
+                    === payload.role_identity.full_head
+              )
+          )
+          && (
+            !v2Identity
+              || (
+                payload.probe_observation
+                  &&
+                payload.probe_observation.binding_sha256
+                    === payload.role_identity
+                      .probe_observation_binding_sha256
+              )
+          )
+          && (
+            !v2Identity
+              || (
+                workerRole
+                  ? (
+                  payload.role_identity.launch_id !== null
+                    && payload.role_identity
+                      .worker_bootstrap_binding_sha256 !== null
+                    && payload.role_identity
+                      .worker_bootstrap_authority_sha256 !== null
+                )
+                : (
+                  payload.role_identity.launch_id === null
+                    && payload.role_identity
+                      .worker_bootstrap_binding_sha256 === null
+                    && payload.role_identity
+                      .worker_bootstrap_authority_sha256 === null
+                  )
+              )
+          ),
+        'INVALID_EVENT',
+        'REGISTER_ROLE.payload.role_identity role/identity/launch/bootstrap binding 非法',
       );
     }
   }

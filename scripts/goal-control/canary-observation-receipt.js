@@ -26,6 +26,10 @@ const CONTROLLER_EVIDENCE_ID_RE =
 const CAPABILITY_VALUE_RE = /^[A-Za-z0-9_-]{43}$/;
 const GITHUB_TOKEN_VALUE_RE =
   /(?:^|[^A-Za-z0-9_])(?:gh[pousr][_-][A-Za-z0-9_-]{8,}|github[_-]pat[_-][A-Za-z0-9_-]{8,}|xox[baprs][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])/i;
+const GENERIC_CREDENTIAL_VALUE_RE =
+  /(?:^|[^A-Za-z0-9])(?:(?:(?:sk|pk|rk|api|auth|token|secret|bearer|credential|access[_-]key)[_-](?:live|test|prod|proj|key)?[_-]?)[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,}|glpat-[A-Za-z0-9_-]{8,}|hf_[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,}|SK[0-9a-f]{32}|SG\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])/i;
+const PRIVATE_KEY_TEXT_RE =
+  /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/i;
 const DISPOSITIONS = Object.freeze([
   'PASS',
   'PROVISIONAL_KNOWN_LIMITATION',
@@ -262,6 +266,17 @@ function readStableFile(file, options) {
     return {
       bytes,
       sha256: `sha256:${sha256(bytes)}`,
+      file_identity_sha256: hashObject({
+        canonical_path_sha256: `sha256:${sha256(file)}`,
+        dev: openedAfter.dev.toString(),
+        ino: openedAfter.ino.toString(),
+        mode: Number(openedAfter.mode & 0o7777n),
+        nlink: Number(openedAfter.nlink),
+        uid: Number(openedAfter.uid),
+        size: Number(openedAfter.size),
+        mtime_ns: openedAfter.mtimeNs.toString(),
+        ctime_ns: openedAfter.ctimeNs.toString(),
+      }),
     };
   } finally {
     fs.closeSync(descriptor);
@@ -298,6 +313,8 @@ function assertNoSensitiveStringLeaves(value) {
       assertControl(
         !CAPABILITY_VALUE_RE.test(current)
           && !GITHUB_TOKEN_VALUE_RE.test(current)
+          && !GENERIC_CREDENTIAL_VALUE_RE.test(current)
+          && !PRIVATE_KEY_TEXT_RE.test(current)
           && !/(?:^|\s)(?:basic|bearer)\s+[A-Za-z0-9._~+/-]+=*(?:$|\s)/i
             .test(current)
           && !/https?:\/\/[^/\s@]+@/i.test(current)
@@ -1440,6 +1457,7 @@ module.exports = {
   protocolRequired,
   receiptOptions,
   requestMatchesBinding,
+  readStableFile,
   targetHashes,
   validateBinding,
   validateKnownLimitation,

@@ -88,6 +88,80 @@ canary acceptance transaction 中先验证 pre-existing observation，再从当�
 controller state 派生 attempt、revision、epoch、packet、task cycle 和 HEAD，最后原子发布
 sanitized `ROLE_IDENTITY_INTENT` 与 controller-held challenge。
 
+host signer 的 exact producer protocol（Node 22）如下。先把除
+`attestation.signature_base64url`、`record_sha256` 外的 observation 写入
+`$OBSERVATION_INPUT`，把 Ed25519 PKCS#8 PEM private key 放在 controller control-root
+之外的 `$HOST_PRIVATE_KEY`；命令会以 `0600` 原子目标文件 `$OBSERVATION_OUTPUT`
+产生 exact bytes，并打印 CLI 所需 content SHA：
+
+```bash
+node --input-type=module <<'NODE'
+import crypto from "node:crypto";
+import fs from "node:fs";
+
+for (const name of [
+  "OBSERVATION_INPUT", "OBSERVATION_OUTPUT", "HOST_PRIVATE_KEY",
+]) {
+  if (!process.env[name]) throw new Error(`missing ${name}`);
+}
+const canonicalValue = (v) => Array.isArray(v)
+  ? v.map(canonicalValue)
+  : v && typeof v === "object"
+    ? Object.fromEntries(Object.keys(v).sort()
+      .map((k) => [k, canonicalValue(v[k])]))
+    : v;
+const canonical = (v) => JSON.stringify(canonicalValue(v));
+const signedPayload = JSON.parse(
+  fs.readFileSync(process.env.OBSERVATION_INPUT, "utf8"),
+);
+const hostPrivateKey = crypto.createPrivateKey(
+  fs.readFileSync(process.env.HOST_PRIVATE_KEY),
+);
+const signature_base64url = crypto.sign(
+  null, Buffer.from(canonical(signedPayload)), hostPrivateKey
+).toString("base64url");
+const sealed = {
+  ...signedPayload,
+  attestation: { ...signedPayload.attestation, signature_base64url }
+};
+const record = {
+  ...sealed,
+  record_sha256: `sha256:${crypto.createHash("sha256")
+    .update(canonical(sealed)).digest("hex")}`
+};
+const fileBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+const identity_receipt_sha256 = `sha256:${crypto.createHash("sha256")
+  .update(fileBytes).digest("hex")}`;
+fs.writeFileSync(
+  process.env.OBSERVATION_OUTPUT,
+  fileBytes,
+  { mode: 0o600, flag: "wx" },
+);
+process.stdout.write(`${identity_receipt_sha256}\n`);
+NODE
+```
+
+`observed_at/expires_at` 必须是实际日历有效且可 round-trip 的
+`YYYY-MM-DDTHH:mm:ss.sssZ`。actual thread/host/session platform ID 只允许
+canonical UUID（包括 UUIDv7）；goal/task/operation/launch/key ID 使用各自 bounded
+controller opaque grammar。冒号、`local`/role alias、capability 长度和
+credential/token/key 形状全部拒绝且不回显。
+receipt 必须位于 owner `0700` parent 下的 `0600`、single-link ordinary file；
+controller 以 `O_NOFOLLOW` descriptor 做 lstat/open/fstat、ancestor 和 after-read
+identity 检查，并用同一组 bytes 做 content hash、JSON parse 和验签。
+
+worker producer 同时提交 exact bootstrap receipt/hash/operation/challenge/plan 和 actual
+worker worktree。`launch_id` 必须等于 bootstrap operation ID；transaction 在发布前重验
+controller task/role、thread/host、worktree/git identity、HEAD 和 bootstrap seal。control
+role 的 launch/bootstrap 两字段必须都是 `null`。
+
+发布物是单一 canonical `ROLE_IDENTITY_CHALLENGE_BUNDLE`，不是先写 intent、再写
+challenge 的 split pair。generation、atomic reservation、temporary publication、
+canonical rename 和 generation completion 任一边界崩溃后，只有逐字相同 original
+request 能收敛到同一 bundle。每个
+goal/task/role/controller-attempt/lifecycle/launch semantic slot 只有一个 original
+operation；不同 operation 在 generation 前整树零写拒绝。
+
 签名 observation 仍无权自报 attempt，也不能覆盖 active session。首次
 FOREMAN 只能由未消费 bootstrap 签发，CAPTAIN/worker 只能由当前 controller authorizer
 签发，Goal-wide later-task FOREMAN 必须复用 exact current Goal identity，terminal、

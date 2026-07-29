@@ -63,6 +63,7 @@ const {
   goalMergeTargetReservations,
   historicalTransactionKeySha256,
   isHistoricalTransactionRetry,
+  isOddTransactionRetry,
   isPreWitnessTransactionRetry,
   readJsonIfExists,
   sealChainedRecord,
@@ -119,14 +120,19 @@ const {
 const {
   assertRequiredLiveBinding: assertRequiredLiveProbeObservationBinding,
   protocolRequired: probeObservationProtocolRequired,
+  readStableFile,
   receiptOptions: probeObservationOptions,
   requestMatchesBinding: probeObservationRequestMatchesBinding,
   validateReceipt: validateProbeObservationReceipt,
 } = require('./canary-observation-receipt');
 const {
+  controllerOpaqueId,
+  platformOpaqueId,
   publicRoleIdentityIntent,
+  roleIdentitySemanticSlotSha256,
   validateRoleIdentityIntent,
   validateRoleIdentityObservation,
+  verifyRoleIdentityObservationRecord,
 } = require('./role-identity-intent');
 const {
   assertWorkerBootstrapCurrentWorktree,
@@ -709,18 +715,21 @@ function probeObservationChallengeFile(paths, eventId) {
 }
 
 function probeObservationChallengeRecord(paths, options, planSha256) {
-  const file = probeObservationChallengeFile(
+  const bundle = readRoleIdentityBundleByOperation(
     paths,
     options.registrationEventId,
   );
-  assertControl(
-    fs.existsSync(file),
-    'CANARY_OBSERVATION_CHALLENGE_REQUIRED',
-    '必须先由 controller prepare-probe-observation-challenge',
+  const legacyFile = probeObservationChallengeFile(
+    paths,
+    options.registrationEventId,
   );
-  const record = readJson(file, 'probe observation challenge');
+  const record = bundle
+    ? bundle.challenge
+    : fs.existsSync(legacyFile)
+      ? readJson(legacyFile, 'probe observation challenge')
+      : null;
   assertControl(
-    record.canary_plan_sha256 === planSha256,
+    record && record.canary_plan_sha256 === planSha256,
     'CANARY_OBSERVATION_CHALLENGE_INVALID',
     'controller challenge 未绑定当前 canary plan',
   );
@@ -738,11 +747,307 @@ function roleIdentityIntentFile(paths, operationId) {
   );
 }
 
+function roleIdentityBundleFile(paths, semanticSlotSha256) {
+  const digest = normalizeHash(
+    semanticSlotSha256,
+    'role identity semantic slot sha256',
+  ).slice('sha256:'.length);
+  return path.join(
+    paths.roleIdentityIntents,
+    `${digest}.role-identity-bundle.json`,
+  );
+}
+
+function validateRoleIdentityBundle(value) {
+  assertControl(
+    value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([
+        'bundle_sha256',
+        'challenge',
+        'intent',
+        'kind',
+        'operation_id',
+        'schema_version',
+        'semantic_slot_sha256',
+      ])
+      && value.schema_version === 2
+      && value.kind === 'ROLE_IDENTITY_CHALLENGE_BUNDLE'
+      && typeof value.challenge === 'object'
+      && value.challenge !== null,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle 非法',
+  );
+  const intent = validateRoleIdentityIntent(value.intent);
+  const challengeKeys = [
+    'schema_version',
+    'kind',
+    'goal_id',
+    'task_id',
+    'role',
+    'thread_id',
+    'host_id',
+    'attempt',
+    'registration_event_id',
+    'canary_plan_sha256',
+    'producer_namespace',
+    'issuer_capability_sha256',
+    'attestation_algorithm',
+    'attestation_key_id',
+    'attestation_public_key_sha256',
+    'challenge',
+    'issued_at',
+    'expires_at',
+    'record_sha256',
+  ];
+  assertControl(
+    JSON.stringify(Object.keys(value.challenge).sort())
+      === JSON.stringify(challengeKeys.sort())
+      && value.challenge.schema_version === 1
+      && value.challenge.kind === 'PROBE_OBSERVATION_CHALLENGE'
+      && ['HOST_ADAPTER', 'ISOLATED_TEST_FAKE'].includes(
+        value.challenge.producer_namespace,
+      )
+      && value.challenge.attestation_algorithm === 'ED25519'
+      && Number.isSafeInteger(value.challenge.attempt)
+      && value.challenge.attempt > 0
+      && /^[0-9a-f]{64}$/.test(value.challenge.challenge || '')
+      && /^[0-9a-f]{64}$/.test(
+        value.challenge.issuer_capability_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.canary_plan_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.attestation_public_key_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.record_sha256 || '',
+      )
+      && /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/
+        .test(value.challenge.issued_at || '')
+      && new Date(Date.parse(value.challenge.issued_at)).toISOString()
+        === value.challenge.issued_at
+      && /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/
+        .test(value.challenge.expires_at || '')
+      && new Date(Date.parse(value.challenge.expires_at)).toISOString()
+        === value.challenge.expires_at,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle challenge schema 非法',
+  );
+  for (const [candidate, label] of [
+    [value.operation_id, 'operation_id'],
+    [value.challenge.goal_id, 'challenge.goal_id'],
+    [value.challenge.task_id, 'challenge.task_id'],
+    [
+      value.challenge.registration_event_id,
+      'challenge.registration_event_id',
+    ],
+    [value.challenge.attestation_key_id, 'challenge.attestation_key_id'],
+  ]) {
+    controllerOpaqueId(candidate, `role identity bundle ${label}`);
+  }
+  platformOpaqueId(
+    value.challenge.thread_id,
+    'role identity bundle challenge.thread_id',
+  );
+  platformOpaqueId(
+    value.challenge.host_id,
+    'role identity bundle challenge.host_id',
+  );
+  const unsignedChallenge = { ...value.challenge };
+  delete unsignedChallenge.record_sha256;
+  const unsignedBundle = { ...value };
+  delete unsignedBundle.bundle_sha256;
+  assertControl(
+    value.operation_id === intent.operation_id
+      && value.semantic_slot_sha256 === intent.semantic_slot_sha256
+      && value.challenge.registration_event_id === intent.operation_id
+      && value.challenge.goal_id === intent.goal_id
+      && value.challenge.task_id === intent.task_id
+      && value.challenge.role === intent.role
+      && value.challenge.thread_id === intent.thread_id
+      && value.challenge.host_id === intent.host_id
+      && value.challenge.attempt === intent.attempt
+      && value.challenge.issuer_capability_sha256
+        === intent.issuer_authority.capability_sha256
+      && value.challenge.attestation_key_id
+        === intent.identity_observation.attestation_key_id
+      && value.challenge.attestation_public_key_sha256
+        === intent.identity_observation.signed_record
+          .attestation.public_key_sha256
+      && value.challenge.record_sha256 === hashObject(unsignedChallenge)
+      && value.bundle_sha256 === hashObject(unsignedBundle),
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle hash/binding 非法',
+  );
+  return {
+    ...JSON.parse(JSON.stringify(value)),
+    intent,
+  };
+}
+
+function readPrivateRoleIdentityJson(file, label, withIdentity = false) {
+  const trusted = readStableFile(file, {
+    label,
+    parentMode: 0o700,
+    mode: 0o600,
+    maxBytes: 512 * 1024,
+  });
+  try {
+    const value = JSON.parse(trusted.bytes.toString('utf8'));
+    return withIdentity
+      ? {
+        value,
+        file_identity_sha256:
+          trusted.file_identity_sha256,
+      }
+      : value;
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `${label} JSON 非法`,
+    );
+  }
+}
+
+function roleIdentityBundles(paths) {
+  if (!fs.existsSync(paths.roleIdentityIntents)) return [];
+  ensurePrivateDirectory(paths.roleIdentityIntents, { repair: false });
+  const names = fs.readdirSync(paths.roleIdentityIntents).sort();
+  for (const name of names) {
+    assertControl(
+      /^[0-9a-f]{64}\.(?:json|role-identity-bundle\.json|role-identity-intent\.json)$/
+        .test(name),
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity inventory unknown filename sha256=${sha256(name)}`,
+    );
+  }
+  return names
+    .filter((name) => (
+      /^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name)
+    ))
+    .map((name) => {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const trusted = readPrivateRoleIdentityJson(
+        file,
+        'role identity atomic bundle',
+        true,
+      );
+      const bundle = validateRoleIdentityBundle(
+        trusted.value,
+      );
+      assertControl(
+        file === roleIdentityBundleFile(
+          paths,
+          bundle.semantic_slot_sha256,
+        ),
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        'role identity atomic bundle path binding 非法',
+      );
+      return {
+        file,
+        bundle,
+        file_identity_sha256:
+          trusted.file_identity_sha256,
+      };
+    });
+}
+
+function roleIdentityInventory(paths) {
+  if (!fs.existsSync(paths.roleIdentityIntents)) return [];
+  ensurePrivateDirectory(paths.roleIdentityIntents, { repair: false });
+  const inventory = [];
+  for (const name of fs.readdirSync(paths.roleIdentityIntents).sort()) {
+    if (/^[0-9a-f]{64}\.json$/.test(name)) continue;
+    if (/^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name)) {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const bundle = validateRoleIdentityBundle(
+        readPrivateRoleIdentityJson(
+          file,
+          'role identity atomic bundle',
+        ),
+      );
+      assertControl(
+        name === path.basename(
+          roleIdentityBundleFile(
+            paths,
+            bundle.semantic_slot_sha256,
+          ),
+        ),
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        `role identity bundle path binding sha256=${sha256(name)} 非法`,
+      );
+      inventory.push({
+        format: 'BUNDLE_V2',
+        file,
+        operation_id: bundle.operation_id,
+        semantic_slot_sha256: bundle.semantic_slot_sha256,
+        intent: bundle.intent,
+        bundle,
+      });
+      continue;
+    }
+    if (/^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name)) {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const intent = validateRoleIdentityIntent(
+        readPrivateRoleIdentityJson(
+          file,
+          'legacy role identity intent',
+        ),
+      );
+      assertControl(
+        name === `${sha256(intent.operation_id)}.role-identity-intent.json`,
+        'ROLE_IDENTITY_INTENT_INVALID',
+        `legacy role identity path binding sha256=${sha256(name)} 非法`,
+      );
+      inventory.push({
+        format: 'LEGACY_V1',
+        file,
+        operation_id: intent.operation_id,
+        semantic_slot_sha256:
+          roleIdentitySemanticSlotSha256(intent),
+        intent,
+        bundle: null,
+      });
+      continue;
+    }
+    assertControl(
+      false,
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity inventory unknown filename sha256=${sha256(name)}`,
+    );
+  }
+  return inventory;
+}
+
+function readRoleIdentityBundleEntryByOperation(paths, operationId) {
+  const matches = roleIdentityBundles(paths)
+    .filter(({ bundle }) => bundle.operation_id === operationId);
+  assertControl(
+    matches.length <= 1,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity operation 出现多个 atomic bundle',
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function readRoleIdentityBundleByOperation(paths, operationId) {
+  const entry = readRoleIdentityBundleEntryByOperation(
+    paths,
+    operationId,
+  );
+  return entry ? entry.bundle : null;
+}
+
 function readRoleIdentityIntent(paths, operationId) {
+  const bundle = readRoleIdentityBundleByOperation(paths, operationId);
+  if (bundle) return bundle.intent;
   const file = roleIdentityIntentFile(paths, operationId);
   if (!fs.existsSync(file)) return null;
   return validateRoleIdentityIntent(
-    readJson(file, `role identity intent ${operationId}`),
+    readPrivateRoleIdentityJson(file, 'legacy role identity intent'),
   );
 }
 
@@ -854,6 +1159,8 @@ function challengeIssuerAuthority(loaded, options, supplied) {
     return {
       kind: 'CURRENT_SESSION',
       capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
       session: sessions[0],
     };
   }
@@ -867,6 +1174,8 @@ function challengeIssuerAuthority(loaded, options, supplied) {
     return {
       kind: 'BOOTSTRAP',
       capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
       session: null,
     };
   }
@@ -889,6 +1198,8 @@ function challengeIssuerAuthority(loaded, options, supplied) {
     return {
       kind: 'GOAL_RECOVERY',
       capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
       session: null,
     };
   }
@@ -910,6 +1221,8 @@ function challengeIssuerAuthority(loaded, options, supplied) {
   return {
     kind: 'SESSION',
     capability_sha256: supplied.sha256,
+    capability_file_identity_sha256:
+      supplied.file_identity_sha256,
     session: sessions[0],
   };
 }
@@ -927,6 +1240,8 @@ function sanitizedChallengeIssuerAuthority(loaded, state, authority) {
   return {
     kind: authority.kind,
     capability_sha256: authority.capability_sha256,
+    capability_file_identity_sha256:
+      authority.capability_file_identity_sha256,
     source_task_id: session ? session.source_task_id || state.task_id : null,
     role: session ? session.role : null,
     thread_id: session ? session.thread_id : null,
@@ -973,7 +1288,28 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     options.taskId,
     role,
   );
-  const issuer = readCapabilityFile(options.issuerCapabilityFile);
+  const trustedInputs = options.trustedInputs;
+  assertControl(
+    trustedInputs
+      && trustedInputs.issuer
+      && trustedInputs.identity,
+    'ROLE_IDENTITY_INPUT_AUTHORITY_INVALID',
+    'role identity producer 缺 descriptor-bound trusted input capture',
+  );
+  const trustedIssuer = trustedInputs.issuer;
+  const issuer = {
+    file: path.resolve(options.issuerCapabilityFile),
+    sha256: sha256(trustedIssuer.bytes.toString('utf8').trim()),
+  };
+  assertControl(
+    /^[A-Za-z0-9_-]{40,128}$/.test(
+      trustedIssuer.bytes.toString('utf8').trim(),
+    ),
+    'CAPABILITY_INVALID',
+    'role identity issuer capability bytes 非法',
+  );
+  issuer.file_identity_sha256 =
+    trustedIssuer.file_identity_sha256;
   const authority = challengeIssuerAuthority(loaded, options, issuer);
   const validatedObservation = validateRoleIdentityObservation({
     receiptFile: options.identityReceipt,
@@ -988,6 +1324,7 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
       loaded.manifest.probe_observation_receipts.max_ttl_ms,
     hostAttestation:
       loaded.manifest.probe_observation_receipts.host_attestation,
+    trustedFile: trustedInputs.identity,
   });
   const observation = validatedObservation.record;
   if (authority.kind === 'CURRENT_SESSION') {
@@ -1064,10 +1401,74 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
       `${role} identity observation 缺 worker bootstrap binding`,
     );
   }
+  const workerBootstrap = ['DEV', 'REVIEW', 'RECEIPT'].includes(role)
+    ? registrationWorkerBootstrapBinding(
+      loaded,
+      state,
+      {
+        taskId: options.taskId,
+        role,
+        threadId: observation.thread_id,
+        hostId: observation.host_id,
+        repositoryWorktree: options.repositoryWorktree,
+        invocationCwd: options.workerWorktree,
+        workerBootstrapReceipt: options.workerBootstrapReceipt,
+        workerBootstrapReceiptSha256:
+          options.workerBootstrapReceiptSha256,
+        workerBootstrapOperationId:
+          options.workerBootstrapOperationId,
+        workerBootstrapChallenge:
+          options.workerBootstrapChallenge,
+        workerBootstrapIdentityPlanSha256:
+          options.workerBootstrapIdentityPlanSha256,
+        workerBootstrapReceiptCapture:
+          trustedInputs.worker_bootstrap_receipt || null,
+        workerBootstrapIntentCapture:
+          trustedInputs.worker_bootstrap_intent || null,
+      },
+    )
+    : null;
+  assertControl(
+    workerBootstrap === null
+      || (
+        workerBootstrap.thread === observation.thread_id
+          && workerBootstrap.host === observation.host_id
+          && workerBootstrap.head === state.full_head
+          && workerBootstrap.operation_id
+            === observation.launch_id
+          && workerBootstrap.binding_sha256
+            === observation.worker_bootstrap_binding_sha256
+      ),
+    'ROLE_IDENTITY_WORKER_AUTHORITY_MISMATCH',
+    'worker identity 必须在 producer transaction 绑定 exact controller bootstrap authority',
+  );
+  const issuerAuthority = sanitizedChallengeIssuerAuthority(
+    loaded,
+    state,
+    authority,
+  );
+  const semanticSlotSha256 = hashObject({
+    schema_version: 1,
+    kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
+    goal_id: options.goalId,
+    task_id: options.taskId,
+    role,
+    attempt,
+    state_revision: state.state_revision,
+    control_epoch: loaded.control.epoch,
+    packet: {
+      revision: state.packet.revision,
+      sha256: state.packet.sha256,
+    },
+    base_head: state.base_head,
+    full_head: state.full_head,
+    task_cycle: state.task_cycle,
+  });
   const intentUnsigned = {
     schema_version: 1,
     kind: 'ROLE_IDENTITY_INTENT',
     operation_id: operationId,
+    semantic_slot_sha256: semanticSlotSha256,
     goal_id: options.goalId,
     task_id: options.taskId,
     role,
@@ -1085,6 +1486,21 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     base_head: state.base_head,
     full_head: state.full_head,
     task_cycle: state.task_cycle,
+    worker_bootstrap: workerBootstrap,
+    worker_bootstrap_authority: workerBootstrap
+      ? {
+        receipt_content_sha256:
+          options.trustedInputs.worker_bootstrap_receipt.sha256,
+        receipt_file_identity_sha256:
+          options.trustedInputs.worker_bootstrap_receipt
+            .file_identity_sha256,
+        intent_content_sha256:
+          options.trustedInputs.worker_bootstrap_intent.sha256,
+        intent_file_identity_sha256:
+          options.trustedInputs.worker_bootstrap_intent
+            .file_identity_sha256,
+      }
+      : null,
     identity_observation: {
       receipt_sha256: normalizeHash(
         options.identityReceiptSha256,
@@ -1098,13 +1514,10 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
       expires_at: observation.expires_at,
       worker_bootstrap_binding_sha256:
         observation.worker_bootstrap_binding_sha256,
+      signed_record: observation,
     },
     issuer_authority: {
-      ...sanitizedChallengeIssuerAuthority(
-        loaded,
-        state,
-        authority,
-      ),
+      ...issuerAuthority,
     },
     created_at: transactionStartedAt,
   };
@@ -1113,6 +1526,7 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     state,
     observation,
     authority,
+    workerBootstrap,
     intent: validateRoleIdentityIntent({
       ...intentUnsigned,
       intent_sha256: hashObject(intentUnsigned),
@@ -1120,9 +1534,78 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
   };
 }
 
+function captureRoleIdentityInput(file, label, maxBytes) {
+  try {
+    return readStableFile(path.resolve(file), {
+      label,
+      parentMode: 0o700,
+      mode: 0o600,
+      maxBytes,
+    });
+  } catch (error) {
+    throw new ControlError(
+      'ROLE_IDENTITY_INPUT_AUTHORITY_INVALID',
+      `${label} file authority 非法 (${error.code || 'UNKNOWN'})`,
+    );
+  }
+}
+
+function captureChallengeTrustedInputs(root, options) {
+  const identity = captureRoleIdentityInput(
+    options.identityReceipt,
+    'role identity observation receipt',
+    64 * 1024,
+  );
+  let observation;
+  try {
+    observation = JSON.parse(identity.bytes.toString('utf8'));
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_OBSERVATION_INVALID',
+      'role identity observation receipt 不是合法 JSON',
+    );
+  }
+  const issuer = captureRoleIdentityInput(
+    options.issuerCapabilityFile,
+    'role identity issuer capability',
+    256,
+  );
+  const trusted = {
+    issuer,
+    identity,
+    worker_bootstrap_receipt: null,
+    worker_bootstrap_intent: null,
+  };
+  if (['DEV', 'REVIEW', 'RECEIPT'].includes(options.role)) {
+    assertControl(
+      typeof options.workerBootstrapReceipt === 'string'
+        && typeof observation.launch_id === 'string',
+      'WORKER_BOOTSTRAP_REGISTRATION_REQUIRED',
+      'worker identity producer 缺 bootstrap authority',
+    );
+    trusted.worker_bootstrap_receipt = captureRoleIdentityInput(
+      options.workerBootstrapReceipt,
+      'worker bootstrap receipt',
+      512 * 1024,
+    );
+    trusted.worker_bootstrap_intent = captureRoleIdentityInput(
+      path.join(
+        path.dirname(path.resolve(options.workerBootstrapReceipt)),
+        'intent.json',
+      ),
+      'worker bootstrap intent',
+      512 * 1024,
+    );
+  }
+  return trusted;
+}
+
 function prepareProbeObservationChallenge(cwd, options) {
   const root = controlRoot(cwd);
   let preparedIdentity = null;
+  let trustedInputs = null;
+  let oddRecoveryAuthorized = false;
+  let pristineOddRecoveryAuthorized = false;
   return withLock(root, () => {
     const {
       loaded,
@@ -1155,8 +1638,10 @@ function prepareProbeObservationChallenge(cwd, options) {
     ensurePrivateDirectory(loaded.paths.roleIdentityIntents, {
       repair: true,
     });
-    const file = probeObservationChallengeFile(loaded.paths, eventId);
-    const intentFile = roleIdentityIntentFile(loaded.paths, eventId);
+    const bundleFile = roleIdentityBundleFile(
+      loaded.paths,
+      intent.semantic_slot_sha256,
+    );
     const hostAttestation =
       loaded.manifest.probe_observation_receipts.host_attestation;
     const request = {
@@ -1180,18 +1665,19 @@ function prepareProbeObservationChallenge(cwd, options) {
       attestation_public_key_sha256:
         hostAttestation.public_key_sha256,
     };
-    if (fs.existsSync(file)) {
-      const existing = readJson(file, 'probe observation challenge');
-      const existingIntent = readRoleIdentityIntent(
-        loaded.paths,
-        eventId,
+    if (fs.existsSync(bundleFile)) {
+      const existingBundle = validateRoleIdentityBundle(
+        readPrivateRoleIdentityJson(
+          bundleFile,
+          'role identity atomic bundle',
+        ),
       );
-      const unsigned = { ...existing };
-      delete unsigned.record_sha256;
+      const existing = existingBundle.challenge;
+      const existingIntent = existingBundle.intent;
       assertControl(
-        existing.record_sha256 === hashObject(unsigned)
-          && existingIntent
+        existingIntent
           && existingIntent.intent_sha256 === intent.intent_sha256
+          && existingBundle.operation_id === eventId
           && Object.entries(request).every(
             ([key, value]) => existing[key] === value,
           ),
@@ -1200,11 +1686,6 @@ function prepareProbeObservationChallenge(cwd, options) {
       );
       return publicProbeObservationChallenge(existing);
     }
-    assertControl(
-      !fs.existsSync(intentFile),
-      'CANARY_OBSERVATION_REPLAY_CONFLICT',
-      'role identity intent/challenge publication 分叉',
-    );
     const issuedAt = nowIso();
     const unsigned = {
       ...request,
@@ -1221,9 +1702,19 @@ function prepareProbeObservationChallenge(cwd, options) {
       ...unsigned,
       record_sha256: hashObject(unsigned),
     };
-    atomicCreate(intentFile, `${canonicalJson(intent)}\n`);
-    fs.chmodSync(intentFile, 0o600);
-    atomicWriteJson(file, record);
+    const bundleUnsigned = {
+      schema_version: 2,
+      kind: 'ROLE_IDENTITY_CHALLENGE_BUNDLE',
+      operation_id: eventId,
+      semantic_slot_sha256: intent.semantic_slot_sha256,
+      intent,
+      challenge: record,
+    };
+    const bundle = validateRoleIdentityBundle({
+      ...bundleUnsigned,
+      bundle_sha256: hashObject(bundleUnsigned),
+    });
+    atomicWriteJson(bundleFile, bundle);
     return publicProbeObservationChallenge(record);
   }, {
     transactionKey: () => {
@@ -1231,6 +1722,7 @@ function prepareProbeObservationChallenge(cwd, options) {
         options.eventId,
         'registration event_id',
       );
+      trustedInputs = captureChallengeTrustedInputs(root, options);
       const request = {
         schema_version: 1,
         kind: 'PROBE_OBSERVATION_CHALLENGE',
@@ -1256,6 +1748,33 @@ function prepareProbeObservationChallenge(cwd, options) {
           options.identityReceiptSha256,
           'role identity observation receipt sha256',
         ),
+        worker_bootstrap_input: {
+          receipt_file: options.workerBootstrapReceipt == null
+            ? null
+            : path.resolve(options.workerBootstrapReceipt),
+          receipt_sha256: options.workerBootstrapReceiptSha256 || null,
+          operation_id: options.workerBootstrapOperationId || null,
+          challenge: options.workerBootstrapChallenge || null,
+          identity_plan_sha256:
+            options.workerBootstrapIdentityPlanSha256 || null,
+          worktree: options.workerWorktree == null
+            ? null
+            : path.resolve(options.workerWorktree),
+        },
+        trusted_input_file_identities: {
+          issuer: trustedInputs.issuer.file_identity_sha256,
+          identity: trustedInputs.identity.file_identity_sha256,
+          worker_bootstrap_receipt:
+            trustedInputs.worker_bootstrap_receipt
+              ? trustedInputs.worker_bootstrap_receipt
+                .file_identity_sha256
+              : null,
+          worker_bootstrap_intent:
+            trustedInputs.worker_bootstrap_intent
+              ? trustedInputs.worker_bootstrap_intent
+                .file_identity_sha256
+              : null,
+        },
       };
       return canonicalTransactionKey(
         'PROBE_OBSERVATION_CHALLENGE',
@@ -1269,90 +1788,76 @@ function prepareProbeObservationChallenge(cwd, options) {
     sameStableOperationMismatchMessage:
       'probe challenge/role identity stable operation 已绑定不同 request',
     beforeGeneration: (transaction) => {
-      const paths = goalPaths(root, safeId(options.goalId, 'goal_id'));
-      const operationId = safeId(
-        options.eventId,
-        'registration event_id',
+      oddRecoveryAuthorized = false;
+      pristineOddRecoveryAuthorized = false;
+      preparedIdentity = prepareChallengeIdentity(
+        root,
+        {
+          ...options,
+          repositoryWorktree: cwd,
+          trustedInputs,
+        },
+        transaction.transaction_started_at,
       );
-      const existingIntent = readRoleIdentityIntent(
-        paths,
-        operationId,
+      const paths = preparedIdentity.loaded.paths;
+      const operationId = preparedIdentity.intent.operation_id;
+      const slot = preparedIdentity.intent.semantic_slot_sha256;
+      const inventory = roleIdentityInventory(paths);
+      const slotMatches = inventory.filter((entry) => (
+        entry.semantic_slot_sha256 === slot
+      ));
+      const operationMatches = inventory.filter((entry) => (
+        entry.operation_id === operationId
+      ));
+      assertControl(
+        slotMatches.length <= 1 && operationMatches.length <= 1,
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        'role identity semantic slot/operation inventory 分叉',
       );
-      const existingChallengeFile = probeObservationChallengeFile(
-        paths,
-        operationId,
-      );
-      if (existingIntent || fs.existsSync(existingChallengeFile)) {
-        assertControl(
-          existingIntent && fs.existsSync(existingChallengeFile),
-          'CANARY_OBSERVATION_REPLAY_CONFLICT',
-          'role identity intent/challenge publication 分叉',
+      if (slotMatches.length === 1 || operationMatches.length === 1) {
+        const existing = (
+          slotMatches[0] || operationMatches[0]
         );
-        const loaded = loadGoalStateUnlocked(root, options.goalId, {
-          repairHeads: false,
-          repairBootstrapConsumption: false,
-          allowIncompleteGoalOperationRead: true,
-        });
-        const retryObservation = validateRoleIdentityObservation({
-          receiptFile: options.identityReceipt,
-          receiptSha256: options.identityReceiptSha256,
-          operationId,
-          goalId: options.goalId,
-          taskId: options.taskId,
-          role: options.role,
-          repositoryHead: existingIntent.full_head,
-          acceptanceTime: existingIntent.created_at,
-          maxTtlMs:
-            loaded.manifest.probe_observation_receipts.max_ttl_ms,
-          hostAttestation:
-            loaded.manifest.probe_observation_receipts.host_attestation,
-        });
         assertControl(
-          existingIntent.goal_id === options.goalId
-            && existingIntent.task_id === options.taskId
-            && existingIntent.role === options.role
-            && existingIntent.operation_id === operationId
-            && existingIntent.identity_observation.receipt_sha256
-              === normalizeHash(
-                options.identityReceiptSha256,
-                'role identity observation receipt sha256',
-              )
-            && existingIntent.identity_observation
-              .receipt_file_identity_sha256
-              === retryObservation.receipt_file_identity_sha256
-            && existingIntent.identity_observation.record_sha256
-              === retryObservation.record.record_sha256
-            && existingIntent.thread_id
-              === retryObservation.record.thread_id
-            && existingIntent.host_id
-              === retryObservation.record.host_id
-            && existingIntent.session_id
-              === retryObservation.record.session_id
-            && existingIntent.launch_id
-              === retryObservation.record.launch_id,
+          existing.semantic_slot_sha256 === slot
+            && existing.operation_id === operationId,
           'CANARY_OBSERVATION_REPLAY_CONFLICT',
-          'role identity intent exact retry input 漂移',
+          '同一 role identity semantic slot 只允许 original operation exact retry',
         );
-        preparedIdentity = {
-          loaded,
-          observation: {
-            thread_id: existingIntent.thread_id,
-            host_id: existingIntent.host_id,
-          },
-          authority: {
-            capability_sha256:
-              existingIntent.issuer_authority.capability_sha256,
-          },
-          intent: existingIntent,
+        const retryIntentUnsigned = {
+          ...preparedIdentity.intent,
+          created_at: existing.intent.created_at,
         };
-      } else {
-        preparedIdentity = prepareChallengeIdentity(
-          root,
-          options,
-          transaction.transaction_started_at,
+        delete retryIntentUnsigned.intent_sha256;
+        preparedIdentity.intent = validateRoleIdentityIntent({
+          ...retryIntentUnsigned,
+          intent_sha256: hashObject(retryIntentUnsigned),
+        });
+        assertControl(
+          existing.intent.intent_sha256
+            === preparedIdentity.intent.intent_sha256,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'role identity exact retry authority/receipt/lineage 漂移',
         );
+        assertControl(
+          existing.format === 'BUNDLE_V2',
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'legacy role identity slot 禁止由新 operation 或新 protocol 覆盖',
+        );
+        oddRecoveryAuthorized = isOddTransactionRetry(
+          transaction.mode,
+        );
+      } else if (isOddTransactionRetry(transaction.mode)) {
+        pristineOddRecoveryAuthorized = true;
       }
     },
+    authorizeOddRecovery: () => oddRecoveryAuthorized,
+    authorizePristineOddRecovery: () =>
+      pristineOddRecoveryAuthorized,
+    afterGenerationBeforeCallback: generationBoundaryFaultHook(
+      cwd,
+      'GOAL_CONTROL_TEST_FAULT_AFTER_ROLE_IDENTITY_GENERATION',
+    ),
   });
 }
 
@@ -1467,6 +1972,8 @@ function registrationWorkerBootstrapBinding(loaded, state, options) {
     taskId: options.taskId,
     role: options.role,
     canaryPolicy: loaded.manifest.worker_canary_bootstrap.policy,
+    receiptCapture: options.workerBootstrapReceiptCapture || null,
+    intentCapture: options.workerBootstrapIntentCapture || null,
   });
   assertControl(
     receipt.head === state.full_head,
@@ -1482,6 +1989,7 @@ function registrationProbeObservationBinding(
   state,
   options,
   eventId = registrationStableEventId(options),
+  bundleEntry = undefined,
 ) {
   const request = probeObservationOptions(options);
   const required = probeObservationProtocolRequired(loaded.manifest);
@@ -1496,13 +2004,25 @@ function registrationProbeObservationBinding(
     '当前 manifest 不接受 probe observation registration binding',
   );
   if (request === null) return null;
-  const challengeRecord = probeObservationChallengeRecord(
-    loaded.paths,
-    {
-      ...options,
-      registrationEventId: eventId,
-    },
-    request.canary_plan_sha256,
+  const challengeRecord = bundleEntry
+    ? bundleEntry.bundle.challenge
+    : probeObservationChallengeRecord(
+      loaded.paths,
+      {
+        ...options,
+        registrationEventId: eventId,
+      },
+      request.canary_plan_sha256,
+    );
+  assertControl(
+    !bundleEntry
+      || (
+        bundleEntry.bundle.operation_id === eventId
+          && challengeRecord.canary_plan_sha256
+            === request.canary_plan_sha256
+      ),
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'registration probe observation 未绑定 captured atomic bundle',
   );
   return validateProbeObservationReceipt({
     ...options,
@@ -1528,7 +2048,7 @@ function registrationProbeObservationBinding(
   });
 }
 
-function registrationTransactionKey(options) {
+function registrationTransactionKey(options, bundleEntry = null) {
   const goalId = safeId(options.goalId, 'goal_id');
   const taskId = safeId(options.taskId, 'task_id');
   const eventId = registrationStableEventId(options);
@@ -1546,6 +2066,12 @@ function registrationTransactionKey(options) {
     status: options.status || 'active',
     launch_id: options.launchId || null,
     authorizer_thread_id: options.authorizerThreadId || null,
+    role_identity_bundle: bundleEntry
+      ? {
+        bundle_sha256: bundleEntry.bundle.bundle_sha256,
+        file_identity_sha256: bundleEntry.file_identity_sha256,
+      }
+      : null,
     ...(workerBootstrapOptions(options)
       ? { worker_bootstrap: workerBootstrapOptions(options) }
       : {}),
@@ -1558,6 +2084,30 @@ function registrationTransactionKey(options) {
     { goal_id: goalId, task_id: taskId },
     eventId,
     hashObject(request),
+  );
+}
+
+function captureRegistrationRoleIdentityBundle(root, options) {
+  const paths = goalPaths(root, safeId(options.goalId, 'goal_id'));
+  const eventId = registrationStableEventId(options);
+  const entry = readRoleIdentityBundleEntryByOperation(paths, eventId);
+  if (entry) return entry;
+  return null;
+}
+
+function assertRegistrationBundleCaptureCurrent(paths, capture) {
+  if (!capture) return;
+  const current = readPrivateRoleIdentityJson(
+    capture.file,
+    'registration captured role identity bundle',
+    true,
+  );
+  assertControl(
+    current.file_identity_sha256 === capture.file_identity_sha256
+      && validateRoleIdentityBundle(current.value).bundle_sha256
+        === capture.bundle.bundle_sha256,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'registration captured role identity bundle file object/bytes 漂移',
   );
 }
 
@@ -2631,6 +3181,7 @@ function initializeGoal(cwd, manifestFile) {
         foreman_recovery_capability_sha256: foremanRecovery.sha256,
         init_receipt_schema_version: 1,
         init_receipt_sha256: receipt.receipt.receipt_sha256,
+        role_identity_protocol_version: 2,
       }));
       fsyncDirectory(temporaryGoalDir);
       maybeInjectRecoveryBatchFault(
@@ -2735,6 +3286,12 @@ function loadGoalFiles(root, goalId, options = {}) {
   assertControl(hashObject(unsignedManifest) === manifestHash, 'CORRUPT_STORE', 'control manifest hash 不匹配');
   const meta = readJson(paths.meta, 'goal metadata');
   assertControl(meta.goal_id === goalId && meta.schema_version === 1, 'CORRUPT_STORE', 'goal metadata 身份不匹配');
+  assertControl(
+    meta.role_identity_protocol_version === undefined
+      || meta.role_identity_protocol_version === 2,
+    'CORRUPT_STORE',
+    'goal metadata role identity protocol version 非法',
+  );
   const unsignedMeta = { ...meta };
   delete unsignedMeta.meta_sha256;
   assertControl(hashObject(unsignedMeta) === meta.meta_sha256, 'CORRUPT_STORE', 'goal metadata hash 不匹配');
@@ -2981,7 +3538,10 @@ function loadTaskEvents(root, goalId, taskId, options = {}) {
 }
 
 function rebuildTask(root, manifest, control, task, options = {}) {
-  let state = initialTaskState(task, manifest);
+  let state = initialTaskState(task, manifest, {
+    roleIdentityProtocolVersion:
+      options.roleIdentityProtocolVersion || 1,
+  });
   const eventIds = new Map();
   for (const event of loadTaskEvents(root, manifest.goal_id, task.id, options)) {
     assertControl(!eventIds.has(event.event_id), 'CORRUPT_STORE', `event id 重复: ${event.event_id}`);
@@ -3117,15 +3677,287 @@ function writeProjections(paths, manifest, snapshot) {
 }
 
 function rebuildAndWriteUnlocked(root, goalId) {
-  const { paths, manifest, control } = loadGoalFiles(root, goalId);
-  const { snapshot } = buildSnapshot(root, manifest, control);
+  const {
+    paths,
+    manifest,
+    meta,
+    control,
+  } = loadGoalFiles(root, goalId);
+  const { snapshot } = buildSnapshot(root, manifest, control, {
+    roleIdentityProtocolVersion:
+      meta.role_identity_protocol_version || 1,
+  });
+  assertRoleIdentityAuthorityReplay(paths, snapshot, meta, manifest);
   const ledger = writeProjections(paths, manifest, snapshot);
   return { ...snapshot, ledger };
 }
 
+function assertRoleIdentityAuthorityReplay(
+  paths,
+  snapshot,
+  meta = null,
+  manifest = null,
+) {
+  const protocolVersion = meta
+    ? Number(meta.role_identity_protocol_version || 1)
+    : 1;
+  if (
+    protocolVersion >= 2
+      && fs.existsSync(paths.roleIdentityIntents)
+  ) {
+    const legacyNames = fs.readdirSync(paths.roleIdentityIntents)
+      .filter((name) => (
+        /^[0-9a-f]{64}\.json$/.test(name)
+          || /^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name)
+      ));
+    assertControl(
+      legacyNames.length === 0,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'v2 role identity goal 禁止任何 legacy pending/authority artifact',
+    );
+  }
+  let inventory;
+  try {
+    inventory = roleIdentityInventory(paths);
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity append-only inventory 无法验证',
+    );
+  }
+  assertControl(
+    protocolVersion >= 2
+      ? inventory.every((entry) => entry.format === 'BUNDLE_V2')
+      : inventory.every((entry) => entry.format === 'LEGACY_V1'),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity inventory format 与 durable protocol marker 不一致',
+  );
+  const operations = new Map();
+  const slots = new Map();
+  for (const entry of inventory) {
+    operations.set(
+      entry.operation_id,
+      (operations.get(entry.operation_id) || 0) + 1,
+    );
+    slots.set(
+      entry.semantic_slot_sha256,
+      (slots.get(entry.semantic_slot_sha256) || 0) + 1,
+    );
+  }
+  assertControl(
+    protocolVersion < 2
+      || [...operations.values(), ...slots.values()]
+        .every((count) => count === 1),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity append-only inventory 存在 duplicate operation/semantic slot/mixed format authority',
+  );
+  const allSessions = Object.entries(snapshot.tasks || {})
+    .flatMap(([taskId, task]) => [
+      ...Object.values(task.sessions || {}),
+      ...Object.values(task.session_history || {}).flat(),
+    ].map((session) => ({ taskId, session })));
+  const acceptedSessions = allSessions.filter(({ session }) => (
+      session
+        && session.role_identity
+        && session.role_identity.protocol
+          === 'goalctl-role-identity-intent-v2'
+    ));
+  for (const { taskId, session } of acceptedSessions) {
+    const binding = session.role_identity;
+    const workerBinding = session.worker_bootstrap || null;
+    const registrationProbe =
+      session.registration_probe_observation
+        || session.probe_observation
+        || null;
+    assertControl(
+      hashObject(session.authorized_by)
+          === binding.registration_authorized_by_sha256
+        && (
+          workerBinding === null
+            ? binding.worker_bootstrap_binding_sha256 === null
+            : workerBinding.binding_sha256
+              === binding.worker_bootstrap_binding_sha256
+        ),
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'accepted role identity session sibling authority 漂移',
+    );
+    let bundleEntry;
+    try {
+      bundleEntry = readRoleIdentityBundleEntryByOperation(
+        paths,
+        binding.operation_id,
+      );
+    } catch {
+      throw new ControlError(
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'accepted role identity append-only authority 无法验证',
+      );
+    }
+    const bundle = bundleEntry && bundleEntry.bundle;
+    const inventoryEntry = inventory.find((entry) => (
+      entry.operation_id === binding.operation_id
+    ));
+    const issuer = bundle
+      && ['SESSION', 'CURRENT_SESSION'].includes(
+        bundle.intent.issuer_authority.kind,
+      )
+      ? allSessions.find(({ taskId: issuerTaskId, session: candidate }) => (
+        issuerTaskId === bundle.intent.issuer_authority.source_task_id
+          && candidate
+          && candidate.role === bundle.intent.issuer_authority.role
+          && candidate.thread_id
+            === bundle.intent.issuer_authority.thread_id
+          && candidate.host_id === bundle.intent.issuer_authority.host_id
+          && candidate.attempt === bundle.intent.issuer_authority.attempt
+          && candidate.registration_event_id
+            === bundle.intent.issuer_authority.registration_event_id
+          && candidate.role_identity
+          && candidate.role_identity.session_id
+            === bundle.intent.issuer_authority.session_id
+      ))
+      : null;
+    if (bundle && manifest) {
+      verifyRoleIdentityObservationRecord(
+        bundle.intent.identity_observation.signed_record,
+        manifest.probe_observation_receipts.host_attestation,
+      );
+    }
+    assertControl(
+      inventoryEntry
+        && inventoryEntry.format === 'BUNDLE_V2'
+        && bundle
+        && bundle.bundle_sha256 === binding.bundle_sha256
+        && bundleEntry.file_identity_sha256
+          === binding.bundle_file_identity_sha256
+        && bundle.semantic_slot_sha256
+          === binding.semantic_slot_sha256
+        && bundle.intent.intent_sha256 === binding.intent_sha256
+        && bundle.intent.task_id === taskId
+        && bundle.intent.role === session.role
+        && bundle.intent.session_id === binding.session_id
+        && bundle.intent.thread_id === session.thread_id
+        && bundle.intent.host_id === session.host_id
+        && bundle.intent.attempt === session.attempt
+        && bundle.intent.launch_id === session.launch_id
+        && bundle.intent.state_revision === binding.state_revision
+        && bundle.intent.control_epoch === binding.control_epoch
+        && bundle.intent.packet.revision === binding.packet_revision
+        && bundle.intent.packet.sha256 === binding.packet_sha256
+        && bundle.intent.base_head === binding.base_head
+        && bundle.intent.full_head === binding.full_head
+        && bundle.intent.task_cycle === binding.task_cycle
+        && bundle.challenge.record_sha256
+          === binding.challenge_record_sha256
+        && registrationProbe
+        && bundle.challenge.challenge
+          === registrationProbe.challenge
+        && bundle.challenge.canary_plan_sha256
+          === registrationProbe.canary_plan_sha256
+        && registrationProbe.binding_sha256
+          === binding.probe_observation_binding_sha256
+        && hashObject(bundle.intent.issuer_authority)
+          === binding.issuer_authority_sha256
+        && bundle.intent.identity_observation.record_sha256
+          === binding.identity_observation_record_sha256
+        && bundle.intent.identity_observation.receipt_sha256
+          === binding.identity_observation_receipt_sha256
+        && bundle.intent.identity_observation
+          .receipt_file_identity_sha256
+          === binding
+            .identity_observation_receipt_file_identity_sha256
+        && bundle.intent.identity_observation
+          .worker_bootstrap_binding_sha256
+          === binding.worker_bootstrap_binding_sha256
+        && (
+          bundle.intent.worker_bootstrap_authority === null
+            ? binding.worker_bootstrap_authority_sha256 === null
+            : hashObject(bundle.intent.worker_bootstrap_authority)
+              === binding.worker_bootstrap_authority_sha256
+        )
+        && hashObject(
+          roleIdentityRegistrationAuthorizedBy(
+            bundle.intent,
+            meta,
+          ),
+        ) === binding.registration_authorized_by_sha256,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'accepted role identity append-only authority 缺失或漂移',
+    );
+    if (
+      ['SESSION', 'CURRENT_SESSION'].includes(
+        bundle.intent.issuer_authority.kind,
+      )
+    ) {
+      assertControl(
+        issuer
+          && issuer.session.capability_sha256
+            === bundle.intent.issuer_authority.capability_sha256
+          && issuer.session.lease_until
+            === bundle.intent.issuer_authority.lease_until
+          && Date.parse(issuer.session.registered_at)
+            <= Date.parse(bundle.intent.created_at)
+          && Date.parse(bundle.intent.created_at)
+            < Date.parse(issuer.session.lease_until),
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity issuer session lineage 不存在或 transaction-time lease 非法',
+      );
+    } else if (bundle.intent.issuer_authority.kind === 'BOOTSTRAP') {
+      assertControl(
+        meta
+          && bundle.intent.issuer_authority
+            .bootstrap_init_receipt_sha256 === meta.init_receipt_sha256,
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity bootstrap init authority 漂移',
+      );
+    }
+  }
+}
+
+function roleIdentityRegistrationAuthorizedBy(intent, meta) {
+  const authority = intent.issuer_authority;
+  if (authority.kind === 'BOOTSTRAP') {
+    assertControl(
+      meta && typeof meta.bootstrap_capability_file === 'string',
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity bootstrap metadata authority 缺失',
+    );
+    return {
+      role: 'BOOTSTRAP',
+      capability_file: meta.bootstrap_capability_file,
+    };
+  }
+  if (authority.kind === 'GOAL_RECOVERY') {
+    assertControl(
+      meta && typeof meta.foreman_recovery_capability_file === 'string',
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity recovery metadata authority 缺失',
+    );
+    return {
+      role: 'GOAL_RECOVERY',
+      capability_file: meta.foreman_recovery_capability_file,
+    };
+  }
+  return {
+    role: authority.role,
+    thread_id: authority.thread_id,
+    host_id: authority.host_id,
+    attempt: authority.attempt,
+  };
+}
+
 function loadGoalStateUnlocked(root, goalId, options = {}) {
   const { paths, manifest, meta, control } = loadGoalFiles(root, goalId, options);
-  const { snapshot, eventIndexes, lastEventHashes } = buildSnapshot(root, manifest, control, options);
+  const { snapshot, eventIndexes, lastEventHashes } = buildSnapshot(
+    root,
+    manifest,
+    control,
+    {
+      ...options,
+      roleIdentityProtocolVersion:
+        meta.role_identity_protocol_version || 1,
+    },
+  );
+  assertRoleIdentityAuthorityReplay(paths, snapshot, meta, manifest);
   const bootstrapConsumption = reconcileBootstrapConsumption(
     root,
     {
@@ -3263,10 +4095,14 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
   const candidates = [];
   for (const name of fs.readdirSync(directory).sort()) {
     if (/^[0-9a-f]{64}\.json$/.test(name)) continue;
+    const isBundle =
+      /^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name);
+    const isLegacy =
+      /^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name);
     assertControl(
-      /^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name),
+      isBundle || isLegacy,
       'ROLE_IDENTITY_INTENT_INVALID',
-      `role identity intent inventory 含未知文件 ${name}`,
+      `role identity intent inventory 含未知文件 sha256=${sha256(name)}`,
     );
     const file = path.join(directory, name);
     const stat = fs.lstatSync(file);
@@ -3277,17 +4113,35 @@ function pendingRoleIdentityIntent(root, loaded, taskId) {
         && (
           typeof process.getuid !== 'function'
             || stat.uid === process.getuid()
+      ),
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity intent inventory file sha256=${sha256(name)} 非法`,
+    );
+    const intent = isBundle
+      ? validateRoleIdentityBundle(
+        readPrivateRoleIdentityJson(
+          file,
+          'role identity atomic bundle',
         ),
-      'ROLE_IDENTITY_INTENT_INVALID',
-      `role identity intent ${name} 不是当前 owner 私有普通文件`,
-    );
-    const intent = validateRoleIdentityIntent(
-      readJson(file, `role identity intent ${name}`),
-    );
+      ).intent
+      : validateRoleIdentityIntent(
+        readPrivateRoleIdentityJson(
+          file,
+          'legacy role identity intent',
+        ),
+      );
+    const expectedName = isBundle
+      ? path.basename(
+        roleIdentityBundleFile(
+          loaded.paths,
+          intent.semantic_slot_sha256,
+        ),
+      )
+      : `${sha256(intent.operation_id)}.role-identity-intent.json`;
     assertControl(
-      name === `${sha256(intent.operation_id)}.role-identity-intent.json`,
+      name === expectedName,
       'ROLE_IDENTITY_INTENT_INVALID',
-      `role identity intent ${name} path binding 非法`,
+      `role identity intent inventory path binding sha256=${sha256(name)} 非法`,
     );
     if (
       intent.goal_id !== loaded.manifest.goal_id
@@ -3340,9 +4194,20 @@ function registrationRoleIdentityBinding(
   options,
   eventId = registrationStableEventId(options),
   workerBootstrap = null,
+  probeObservation = null,
+  bundleEntryOverride = undefined,
 ) {
   if (!probeObservationProtocolRequired(loaded.manifest)) return null;
-  const intent = readRoleIdentityIntent(loaded.paths, eventId);
+  const bundleEntry = bundleEntryOverride === undefined
+    ? readRoleIdentityBundleEntryByOperation(
+      loaded.paths,
+      eventId,
+    )
+    : bundleEntryOverride;
+  const bundle = bundleEntry && bundleEntry.bundle;
+  const intent = bundle
+    ? bundle.intent
+    : readRoleIdentityIntent(loaded.paths, eventId);
   assertControl(
     intent,
     'ROLE_IDENTITY_INTENT_REQUIRED',
@@ -3389,8 +4254,10 @@ function registrationRoleIdentityBinding(
     'ROLE_IDENTITY_INTENT_EXPIRED',
     'upstream role identity intent 已过期',
   );
-  return {
-    protocol: 'goalctl-role-identity-intent-v1',
+  const base = {
+    protocol: bundle
+      ? 'goalctl-role-identity-intent-v2'
+      : 'goalctl-role-identity-intent-v1',
     operation_id: intent.operation_id,
     intent_sha256: intent.intent_sha256,
     session_id: intent.session_id,
@@ -3400,6 +4267,51 @@ function registrationRoleIdentityBinding(
     launch_id: intent.launch_id,
     identity_observation_receipt_sha256:
       intent.identity_observation.receipt_sha256,
+  };
+  if (!bundle) return base;
+  assertControl(
+    probeObservation === null
+      || (
+        probeObservation.challenge === bundle.challenge.challenge
+          && probeObservation.canary_plan_sha256
+            === bundle.challenge.canary_plan_sha256
+          && probeObservation.thread_id === intent.thread_id
+          && probeObservation.host_id === intent.host_id
+          && probeObservation.attempt === intent.attempt
+      ),
+    'ROLE_IDENTITY_OBSERVATION_BINDING_MISMATCH',
+    'registration probe observation 与 captured identity challenge 不一致',
+  );
+  return {
+    ...base,
+    semantic_slot_sha256: intent.semantic_slot_sha256,
+    bundle_sha256: bundle.bundle_sha256,
+    bundle_file_identity_sha256:
+      bundleEntry.file_identity_sha256,
+    issuer_authority_sha256: hashObject(intent.issuer_authority),
+    identity_observation_record_sha256:
+      intent.identity_observation.record_sha256,
+    identity_observation_receipt_file_identity_sha256:
+      intent.identity_observation.receipt_file_identity_sha256,
+    worker_bootstrap_binding_sha256:
+      intent.identity_observation.worker_bootstrap_binding_sha256,
+    worker_bootstrap_authority_sha256:
+      intent.worker_bootstrap_authority === null
+        ? null
+        : hashObject(intent.worker_bootstrap_authority),
+    state_revision: intent.state_revision,
+    control_epoch: intent.control_epoch,
+    packet_revision: intent.packet.revision,
+    packet_sha256: intent.packet.sha256,
+    base_head: intent.base_head,
+    full_head: intent.full_head,
+    task_cycle: intent.task_cycle,
+    challenge_record_sha256: bundle.challenge.record_sha256,
+    probe_observation_binding_sha256:
+      probeObservation ? probeObservation.binding_sha256 : null,
+    registration_authorized_by_sha256: hashObject(
+      roleIdentityRegistrationAuthorizedBy(intent, loaded.meta),
+    ),
   };
 }
 
@@ -11776,6 +12688,8 @@ function recoverExpiredForeman(cwd, options) {
           acceptanceTime: acceptedAt,
         },
         rootRecoveryId,
+        null,
+        probeObservation,
       );
       roleIdentity = registrationRoleIdentityBinding(
         loaded,
@@ -12630,6 +13544,7 @@ function exactUnsealedRegistrationPreparedRequest(
     options,
     eventId,
     workerBootstrap,
+    probeObservation,
   );
   const request = {
     schema_version: 1,
@@ -12873,6 +13788,7 @@ function registerRole(cwd, options) {
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
   let pristineAuthorizationAt = null;
+  let registrationBundleCapture = null;
   return withLock(root, () => {
     safeId(options.goalId, 'goal_id');
     const attempt = Number(options.attempt || 1);
@@ -12917,6 +13833,13 @@ function registerRole(cwd, options) {
     });
     const state = loaded.snapshot.tasks[options.taskId];
     assertControl(state, 'UNKNOWN_TASK', `未知 task ${options.taskId}`);
+    assertControl(
+      !probeObservationProtocolRequired(loaded.manifest)
+        || Number(loaded.meta.role_identity_protocol_version || 1) < 2
+        || registrationBundleCapture,
+      'ROLE_IDENTITY_INTENT_REQUIRED',
+      'v2 registration transaction 缺 descriptor-bound atomic bundle capture',
+    );
     assertControl(
       goalControlEventOccurrences(loaded, eventId).length === 0,
       'EVENT_ID_CONFLICT',
@@ -13133,6 +14056,10 @@ function registerRole(cwd, options) {
           authorized_by: request.authorized_by,
         },
       };
+      assertRegistrationBundleCaptureCurrent(
+        loaded.paths,
+        registrationBundleCapture,
+      );
       const validated = validateEvent(registration);
       validated.input_sha256 = hashObject(validated);
       validated.accepted_at = pendingRegistrationIntent.accepted_at;
@@ -13186,6 +14113,7 @@ function registerRole(cwd, options) {
         acceptanceTime: registrationAcceptedAt,
       },
       eventId,
+      registrationBundleCapture,
     );
     const roleIdentity = registrationRoleIdentityBinding(
       loaded,
@@ -13193,6 +14121,8 @@ function registerRole(cwd, options) {
       options,
       eventId,
       workerBootstrap,
+      probeObservation,
+      registrationBundleCapture,
     );
     const existingIsCurrent = existing
       && existing.registered_control_epoch === loaded.control.epoch
@@ -13535,6 +14465,10 @@ function registerRole(cwd, options) {
     let durableCommit = null;
     let validated = null;
     try {
+      assertRegistrationBundleCaptureCurrent(
+        loaded.paths,
+        registrationBundleCapture,
+      );
       validated = validateEvent(registration);
       const inputHash = hashObject(validated);
       validated.input_sha256 = inputHash;
@@ -13572,7 +14506,14 @@ function registerRole(cwd, options) {
       throw error;
     }
   }, {
-    transactionKey: () => registrationTransactionKey(options),
+    transactionKey: () => {
+      registrationBundleCapture =
+        captureRegistrationRoleIdentityBundle(root, options);
+      return registrationTransactionKey(
+        options,
+        registrationBundleCapture,
+      );
+    },
     sameStableOperationMismatchCode: 'PREPARED_REQUEST_MISMATCH',
     sameStableOperationMismatchMessage:
       'registration stable operation 已绑定不同 prepared request',
@@ -13598,6 +14539,12 @@ function registerRole(cwd, options) {
         );
         const stableRegistrationEventId =
           registrationStableEventId(options);
+        assertControl(
+          !probeObservationProtocolRequired(prevalidated.manifest)
+            || probeObservationOptions(options) !== null,
+          'CANARY_OBSERVATION_REQUIRED',
+          'manifest 启用 probe observation receipts 后，registration 必须携带 sealed PASS receipt',
+        );
         const prevalidatedWorkerBootstrap =
           registrationWorkerBootstrapBinding(
           prevalidated,
@@ -13616,6 +14563,8 @@ function registerRole(cwd, options) {
             options,
             stableRegistrationEventId,
             prevalidatedWorkerBootstrap,
+            null,
+            registrationBundleCapture,
           );
         }
       }
@@ -15047,5 +15996,6 @@ module.exports = {
   retryAcceptedCommandEvent,
   resumeCapsule,
   taskActionProjection,
+  validateRoleIdentityBundle,
   validateRoleLaunchBoundary,
 };

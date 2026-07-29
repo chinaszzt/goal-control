@@ -1,4 +1,5 @@
 import { createRequire } from "module";
+import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -9,21 +10,22 @@ const validation = nodeRequire(path.join(ROOT, "scripts", "goal-control", "valid
   EVENT_PAYLOAD_KEYS: Record<string, readonly string[]>;
   EVENT_PAYLOAD_REQUIRED: Record<string, readonly string[]>;
   WORKER_CANARY_BOOTSTRAP_PROTOCOL: string;
+  validateEvent: (value: unknown) => unknown;
   validateLaunchManifest: (value: unknown) => unknown;
 };
 const evidence = nodeRequire(path.join(ROOT, "scripts", "goal-control", "evidence.js")) as {
   EXPECTED_PRODUCER: Record<string, readonly string[]>;
   MECHANICAL_EVIDENCE_KINDS: Set<string>;
 };
-const { compileDraft202012 } = nodeRequire(
-  path.join(
-    ROOT,
-    "scripts",
-    "goal-control",
-    "json-schema-2020-runtime.js",
-  ),
-) as {
-  compileDraft202012: (
+const Ajv2020 = nodeRequire("ajv/dist/2020").default as new (
+  options: Record<string, unknown>,
+) => {
+  addFormat: (
+    name: string,
+    definition: Record<string, unknown>,
+  ) => void;
+  addSchema: (schema: Record<string, any>) => void;
+  compile: (
     schema: Record<string, any>,
   ) => (value: unknown) => boolean;
 };
@@ -50,12 +52,167 @@ const { hashObject } = nodeRequire(
 ) as {
   hashObject: (value: unknown) => string;
 };
+const { applyEvent, initialTaskState } = nodeRequire(
+  path.join(ROOT, "scripts", "goal-control", "fsm.js"),
+) as {
+  applyEvent: (
+    state: Record<string, any>,
+    event: Record<string, any>,
+    epoch: number,
+  ) => Record<string, any>;
+  initialTaskState: (
+    task: Record<string, any>,
+    manifest: Record<string, any>,
+    options?: Record<string, any>,
+  ) => Record<string, any>;
+};
+const { validateRoleIdentityBundle } = nodeRequire(
+  path.join(ROOT, "scripts", "goal-control", "goal.js"),
+) as {
+  validateRoleIdentityBundle: (
+    value: Record<string, any>,
+  ) => Record<string, any>;
+};
 
 function readJson(relative: string): Record<string, any> {
   return JSON.parse(readFileSync(path.join(ROOT, relative), "utf8")) as Record<string, any>;
 }
 
+function compileDraft202012(
+  schema: Record<string, any>,
+  options: Record<string, unknown> = {},
+  referencedSchemas: Record<string, any>[] = [],
+): (value: unknown) => boolean {
+  const ajv = new Ajv2020({
+    strict: true,
+    strictTypes: false,
+    allErrors: true,
+    validateFormats: true,
+    ...options,
+  });
+  ajv.addFormat("date-time", {
+    type: "string",
+    validate: (value: unknown) => (
+      typeof value === "string"
+        && Number.isFinite(Date.parse(value))
+        && new Date(Date.parse(value)).toISOString() === value
+    ),
+  });
+  referencedSchemas.forEach((referenced) => ajv.addSchema(referenced));
+  return ajv.compile(schema);
+}
+
+const PLATFORM_THREAD = "019fabbe-3b38-7a23-8d8f-8c392bced038";
+const PLATFORM_HOST = "019fabbe-3b38-7a23-8d8f-8c392bced039";
+const PLATFORM_SESSION = "019fabbe-3b38-7a23-8d8f-8c392bced03a";
+
 describe("goal-control machine contract schemas", () => {
+  it("requires v2 identity only across the durable new-goal protocol boundary", () => {
+    const packet = {
+      revision: 1,
+      path: "packet.md",
+      sha256: `sha256:${"a".repeat(64)}`,
+    };
+    const manifest = {
+      base_head: "b".repeat(40),
+      probe_observation_receipts: {},
+    };
+    const legacy = initialTaskState(
+      { id: "TASK-A", packet },
+      manifest,
+    );
+    const current = initialTaskState(
+      { id: "TASK-A", packet },
+      manifest,
+      { roleIdentityProtocolVersion: 2 },
+    );
+    const event = {
+      schema_version: 1,
+      event_id: "legacy-register-foreman",
+      goal_id: "goal-schema-parity",
+      task_id: "TASK-A",
+      type: "REGISTER_ROLE",
+      actor: {
+        role: "FOREMAN",
+        thread_id: "legacy-foreman-thread",
+        host_id: "legacy-host",
+      },
+      actor_sequence: 1,
+      expected_state_revision: 0,
+      control_epoch: 0,
+      packet,
+      base_head: manifest.base_head,
+      full_head: manifest.base_head,
+      accepted_at: "2026-07-29T01:02:03.004Z",
+      payload: {
+        role: "FOREMAN",
+        thread_id: "legacy-foreman-thread",
+        host_id: "legacy-host",
+        attempt: 1,
+        lease_ms: 60_000,
+        status: "active",
+        launch_id: null,
+        capability_sha256: "c".repeat(64),
+        capability_file: "/legacy/capability",
+        authorized_by: {
+          role: "BOOTSTRAP",
+          capability_file: "/private/controller-capability",
+        },
+        probe_observation: {
+          thread_id: "legacy-foreman-thread",
+          host_id: "legacy-host",
+          attempt: 1,
+          accepted_at: "2026-07-29T01:02:03.004Z",
+          binding_sha256: `sha256:${"d".repeat(64)}`,
+        },
+      },
+    };
+    const legacyRegistered = applyEvent(
+      legacy,
+      structuredClone(event),
+      0,
+    );
+    expect(legacyRegistered)
+      .toMatchObject({
+        sessions: {
+          FOREMAN: {
+            thread_id: "legacy-foreman-thread",
+          },
+        },
+      });
+    const refreshedProbe = {
+      ...legacyRegistered.sessions.FOREMAN.probe_observation,
+      accepted_at: "2026-07-29T01:02:04.005Z",
+      binding_sha256: `sha256:${"e".repeat(64)}`,
+    };
+    const legacyRotated = applyEvent(
+      legacyRegistered,
+      {
+        ...structuredClone(event),
+        event_id: "legacy-refresh-foreman",
+        type: "PROBE_OBSERVATION_REFRESHED",
+        actor_sequence: 1,
+        expected_state_revision: 1,
+        accepted_at: refreshedProbe.accepted_at,
+        payload: {
+          role: "FOREMAN",
+          attempt: 1,
+          previous_binding_sha256: `sha256:${"d".repeat(64)}`,
+          probe_observation: refreshedProbe,
+          request_sha256: `sha256:${"f".repeat(64)}`,
+        },
+      },
+      0,
+    );
+    expect(
+      legacyRotated.sessions.FOREMAN.probe_observation.binding_sha256,
+    ).toBe(refreshedProbe.binding_sha256);
+    expect(() => applyEvent(current, structuredClone(event), 0))
+      .toThrow(expect.objectContaining({
+        code: "ROLE_IDENTITY_INTENT_MISMATCH",
+      }));
+  });
+
   it("defines strict host observation and controller identity intent contracts", () => {
     const observation = readJson(
       "scripts/goal-control/schemas/role-identity-observation.schema.json",
@@ -136,7 +293,11 @@ describe("goal-control machine contract schemas", () => {
       "scripts/goal-control/schemas/role-identity-intent.schema.json",
     );
     const schemaObservation = compileDraft202012(observationSchema);
-    const schemaIntent = compileDraft202012(intentSchema);
+    const schemaIntent = compileDraft202012(
+      intentSchema,
+      {},
+      [observationSchema],
+    );
     const runtimeObservation = (value: Record<string, any>): boolean => {
       try {
         validateRoleIdentityObservationStructure(value);
@@ -160,9 +321,9 @@ describe("goal-control machine contract schemas", () => {
       goal_id: "goal-schema-parity",
       task_id: "TASK-A",
       role: "FOREMAN",
-      thread_id: "codex-thread-actual-schema-1",
-      host_id: "codex-host-actual-schema-1",
-      session_id: "codex-session-actual-schema-1",
+      thread_id: PLATFORM_THREAD,
+      host_id: PLATFORM_HOST,
+      session_id: PLATFORM_SESSION,
       launch_id: null,
       repository_head: "a".repeat(40),
       worker_bootstrap_binding_sha256: null,
@@ -180,6 +341,7 @@ describe("goal-control machine contract schemas", () => {
       schema_version: 1,
       kind: "ROLE_IDENTITY_INTENT",
       operation_id: observation.operation_id,
+      semantic_slot_sha256: `sha256:${"0".repeat(64)}`,
       goal_id: observation.goal_id,
       task_id: observation.task_id,
       role: observation.role,
@@ -197,6 +359,8 @@ describe("goal-control machine contract schemas", () => {
       base_head: "a".repeat(40),
       full_head: "a".repeat(40),
       task_cycle: 1,
+      worker_bootstrap: null,
+      worker_bootstrap_authority: null,
       identity_observation: {
         receipt_sha256: `sha256:${"f".repeat(64)}`,
         receipt_file_identity_sha256: `sha256:${"2".repeat(64)}`,
@@ -205,10 +369,13 @@ describe("goal-control machine contract schemas", () => {
         observed_at: observation.observed_at,
         expires_at: observation.expires_at,
         worker_bootstrap_binding_sha256: null,
+        signed_record: observation,
       },
       issuer_authority: {
         kind: "BOOTSTRAP",
         capability_sha256: "1".repeat(64),
+        capability_file_identity_sha256:
+          `sha256:${"4".repeat(64)}`,
         source_task_id: null,
         role: null,
         thread_id: null,
@@ -228,6 +395,43 @@ describe("goal-control machine contract schemas", () => {
     ): Record<string, any> => {
       const unsigned = structuredClone(value);
       delete unsigned.intent_sha256;
+      if (unsigned.identity_observation?.signed_record) {
+        const signedRecord = unsigned.identity_observation.signed_record;
+        Object.assign(signedRecord, {
+          operation_id: unsigned.operation_id,
+          goal_id: unsigned.goal_id,
+          task_id: unsigned.task_id,
+          role: unsigned.role,
+          thread_id: unsigned.thread_id,
+          host_id: unsigned.host_id,
+          session_id: unsigned.session_id,
+          launch_id: unsigned.launch_id,
+          repository_head: unsigned.full_head,
+          worker_bootstrap_binding_sha256:
+            unsigned.identity_observation
+              .worker_bootstrap_binding_sha256,
+          observed_at: unsigned.identity_observation.observed_at,
+          expires_at: unsigned.identity_observation.expires_at,
+        });
+        delete signedRecord.record_sha256;
+        signedRecord.record_sha256 = hashObject(signedRecord);
+        unsigned.identity_observation.record_sha256 =
+          signedRecord.record_sha256;
+      }
+      unsigned.semantic_slot_sha256 = hashObject({
+        schema_version: 1,
+        kind: "ROLE_IDENTITY_SEMANTIC_SLOT",
+        goal_id: unsigned.goal_id,
+        task_id: unsigned.task_id,
+        role: unsigned.role,
+        attempt: unsigned.attempt,
+        state_revision: unsigned.state_revision,
+        control_epoch: unsigned.control_epoch,
+        packet: unsigned.packet,
+        base_head: unsigned.base_head,
+        full_head: unsigned.full_head,
+        task_cycle: unsigned.task_cycle,
+      });
       return {
         ...unsigned,
         intent_sha256: hashObject(unsigned),
@@ -256,6 +460,15 @@ describe("goal-control machine contract schemas", () => {
       false,
     );
     parity(schemaObservation, runtimeObservation, observation, true);
+    parity(
+      schemaObservation,
+      runtimeObservation,
+      {
+        ...observation,
+        thread_id: PLATFORM_THREAD,
+      },
+      true,
+    );
     const omittedObservationLaunch = structuredClone(observation);
     delete omittedObservationLaunch.launch_id;
     parity(
@@ -273,7 +486,25 @@ describe("goal-control machine contract schemas", () => {
     parity(
       schemaObservation,
       runtimeObservation,
+      { ...observation, observed_at: "2025-02-29T01:02:03.004Z" },
+      false,
+    );
+    parity(
+      schemaObservation,
+      runtimeObservation,
       { ...observation, thread_id: `GhP_${"Z".repeat(36)}` },
+      false,
+    );
+    parity(
+      schemaObservation,
+      runtimeObservation,
+      { ...observation, thread_id: `sk_live_${"Z".repeat(32)}` },
+      false,
+    );
+    parity(
+      schemaObservation,
+      runtimeObservation,
+      { ...observation, operation_id: "colon:intent" },
       false,
     );
     parity(
@@ -397,6 +628,340 @@ describe("goal-control machine contract schemas", () => {
       sealIntent(missingIntent),
       false,
     );
+
+    const bundleSchema = readJson(
+      "scripts/goal-control/schemas/role-identity-bundle.schema.json",
+    );
+    const schemaBundle = compileDraft202012(
+      bundleSchema,
+      {},
+      [observationSchema, intentSchema],
+    );
+    const runtimeBundle = (value: Record<string, any>): boolean => {
+      try {
+        validateRoleIdentityBundle(value);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    };
+    const bundleIntent = sealIntent(intentCore);
+    const challengeUnsigned = {
+      schema_version: 1,
+      kind: "PROBE_OBSERVATION_CHALLENGE",
+      goal_id: bundleIntent.goal_id,
+      task_id: bundleIntent.task_id,
+      role: bundleIntent.role,
+      thread_id: bundleIntent.thread_id,
+      host_id: bundleIntent.host_id,
+      attempt: bundleIntent.attempt,
+      registration_event_id: bundleIntent.operation_id,
+      canary_plan_sha256: `sha256:${"c".repeat(64)}`,
+      producer_namespace: "HOST_ADAPTER",
+      issuer_capability_sha256:
+        bundleIntent.issuer_authority.capability_sha256,
+      attestation_algorithm: "ED25519",
+      attestation_key_id:
+        bundleIntent.identity_observation.attestation_key_id,
+      attestation_public_key_sha256:
+        bundleIntent.identity_observation.signed_record
+          .attestation.public_key_sha256,
+      challenge: "d".repeat(64),
+      issued_at: "2026-07-29T01:02:04.005Z",
+      expires_at: "2026-07-29T01:03:04.005Z",
+    };
+    const challenge = {
+      ...challengeUnsigned,
+      record_sha256: hashObject(challengeUnsigned),
+    };
+    const bundleUnsigned = {
+      schema_version: 2,
+      kind: "ROLE_IDENTITY_CHALLENGE_BUNDLE",
+      operation_id: bundleIntent.operation_id,
+      semantic_slot_sha256: bundleIntent.semantic_slot_sha256,
+      intent: bundleIntent,
+      challenge,
+    };
+    const bundle = {
+      ...bundleUnsigned,
+      bundle_sha256: hashObject(bundleUnsigned),
+    };
+    expect(schemaBundle(bundle)).toBe(true);
+    expect(runtimeBundle(bundle)).toBe(true);
+    const bundleExtra = {
+      ...structuredClone(bundle),
+      nested_extra: { arbitrary: "rejected" },
+    };
+    expect(schemaBundle(bundleExtra)).toBe(false);
+    expect(runtimeBundle(bundleExtra)).toBe(false);
+    const bundleBadTimestamp = structuredClone(bundle);
+    bundleBadTimestamp.challenge.issued_at =
+      "2025-02-29T01:02:04.005Z";
+    expect(schemaBundle(bundleBadTimestamp)).toBe(false);
+    expect(runtimeBundle(bundleBadTimestamp)).toBe(false);
+    const bundleSecretId = structuredClone(bundle);
+    bundleSecretId.operation_id = `credential_prod_${"x".repeat(20)}`;
+    expect(schemaBundle(bundleSecretId)).toBe(false);
+    expect(runtimeBundle(bundleSecretId)).toBe(false);
+    const bundleCrossField = structuredClone(bundle);
+    bundleCrossField.challenge.host_id =
+      "019fabbe-3b38-7a23-8d8f-8c392bced03b";
+    expect(schemaBundle(bundleCrossField)).toBe(true);
+    expect(runtimeBundle(bundleCrossField)).toBe(false);
+    const bundleBadSeal = structuredClone(bundle);
+    bundleBadSeal.bundle_sha256 = `sha256:${"f".repeat(64)}`;
+    expect(schemaBundle(bundleBadSeal)).toBe(true);
+    expect(runtimeBundle(bundleBadSeal)).toBe(false);
+  });
+
+  it("executes the checked-in event role identity binding in Ajv/runtime parity", () => {
+    const eventSchema = readJson(
+      "scripts/goal-control/schemas/event.schema.json",
+    );
+    // Historical P1 conditional branches put `required` beside properties
+    // declared in the shared payload schema. Keep every other strict check
+    // enabled while exercising the exact checked-in event contract.
+    const schemaEvent = compileDraft202012(eventSchema, {
+      strictRequired: false,
+    });
+    const runtimeEvent = (value: Record<string, any>): boolean => {
+      try {
+        validation.validateEvent(value);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const identityV1 = {
+      protocol: "goalctl-role-identity-intent-v1",
+      operation_id: "register-foreman-parity-1",
+      intent_sha256: `sha256:${"1".repeat(64)}`,
+      session_id: "foreman-session-parity-1",
+      thread_id: "foreman-thread-parity-1",
+      host_id: "foreman-host-parity-1",
+      attempt: 1,
+      launch_id: null,
+      identity_observation_receipt_sha256:
+        `sha256:${"2".repeat(64)}`,
+    };
+    const identityV2 = {
+      ...identityV1,
+      protocol: "goalctl-role-identity-intent-v2",
+      session_id: PLATFORM_SESSION,
+      thread_id: PLATFORM_THREAD,
+      host_id: PLATFORM_HOST,
+      semantic_slot_sha256: `sha256:${"3".repeat(64)}`,
+      bundle_sha256: `sha256:${"4".repeat(64)}`,
+      bundle_file_identity_sha256: `sha256:${"5".repeat(64)}`,
+      issuer_authority_sha256: `sha256:${"6".repeat(64)}`,
+      identity_observation_record_sha256:
+        `sha256:${"7".repeat(64)}`,
+      identity_observation_receipt_file_identity_sha256:
+        `sha256:${"8".repeat(64)}`,
+      worker_bootstrap_binding_sha256: null,
+      worker_bootstrap_authority_sha256: null,
+      state_revision: 0,
+      control_epoch: 0,
+      packet_revision: 1,
+      packet_sha256: `sha256:${"9".repeat(64)}`,
+      base_head: "a".repeat(40),
+      full_head: "a".repeat(40),
+      task_cycle: 1,
+      challenge_record_sha256: `sha256:${"a".repeat(64)}`,
+      probe_observation_binding_sha256:
+        `sha256:${"b".repeat(64)}`,
+      registration_authorized_by_sha256: hashObject({
+        role: "BOOTSTRAP",
+        capability_file: "/private/controller-capability",
+      }),
+    };
+    const event = {
+      schema_version: 1,
+      event_id: "register-foreman-parity-event-1",
+      goal_id: "goal-schema-parity",
+      task_id: "TASK-A",
+      type: "REGISTER_ROLE",
+      actor: {
+        role: "FOREMAN",
+        thread_id: identityV1.thread_id,
+        host_id: identityV1.host_id,
+      },
+      actor_sequence: 1,
+      expected_state_revision: 0,
+      control_epoch: 0,
+      packet: {
+        revision: 1,
+        sha256: `sha256:${"9".repeat(64)}`,
+      },
+      base_head: "a".repeat(40),
+      full_head: "a".repeat(40),
+      payload: {
+        role: "FOREMAN",
+        thread_id: identityV1.thread_id,
+        host_id: identityV1.host_id,
+        attempt: 1,
+        lease_ms: 60_000,
+        status: "active",
+        launch_id: null,
+        task_nonce: null,
+        capability_sha256: "b".repeat(64),
+        capability_file: "/private/controller-capability",
+        authorized_by: {
+          role: "BOOTSTRAP",
+          capability_file: "/private/controller-capability",
+        },
+        role_identity: identityV1,
+      },
+    };
+    const parity = (
+      value: Record<string, any>,
+      expected: boolean,
+    ): void => {
+      expect(schemaEvent(value)).toBe(expected);
+      expect(runtimeEvent(value)).toBe(expected);
+    };
+    const probeObservationFor = (
+      identity: Record<string, any>,
+    ): Record<string, any> => {
+      const publicKeySpki = Buffer.from(
+        `302a300506032b6570032100${"01".repeat(32)}`,
+        "hex",
+      );
+      const unsigned = {
+        schema_version: 1,
+        protocol: "goalctl-sealed-probe-observation-v1",
+        accepted_at: "2026-07-29T01:02:05.006Z",
+        attestation_algorithm: "ED25519",
+        attestation_key_id: "host-attestation-schema-v1",
+        attestation_public_key_sha256:
+          `sha256:${createHash("sha256")
+            .update(publicKeySpki).digest("hex")}`,
+        attestation_public_key_spki_base64:
+          publicKeySpki.toString("base64"),
+        attestation_signature_base64url: "C".repeat(86),
+        plan_file: "/private/plan.json",
+        plan_file_sha256: `sha256:${"1".repeat(64)}`,
+        receipt_file: "/private/receipt.json",
+        receipt_sha256: `sha256:${"2".repeat(64)}`,
+        canary_plan_sha256: `sha256:${"3".repeat(64)}`,
+        stable_id: "probe-observation-schema-v1",
+        challenge: "4".repeat(64),
+        thread_id: identity.thread_id,
+        host_id: identity.host_id,
+        attempt: identity.attempt,
+        target_identity_sha256: `sha256:${"5".repeat(64)}`,
+        target_fingerprint_sha256: `sha256:${"6".repeat(64)}`,
+        aggregate_disposition: "PASS",
+        observed_at: "2026-07-29T01:02:03.004Z",
+        expires_at: "2026-07-29T01:03:03.004Z",
+        probe_results_sha256: `sha256:${"7".repeat(64)}`,
+        receipt_binding_sha256: `sha256:${"8".repeat(64)}`,
+        request_sha256: `sha256:${"9".repeat(64)}`,
+      };
+      return {
+        ...unsigned,
+        binding_sha256: hashObject(unsigned),
+      };
+    };
+    const withIdentity = (
+      identity: Record<string, any>,
+    ): Record<string, any> => {
+      const sealedIdentity = structuredClone(identity);
+      const probeObservation =
+        sealedIdentity.protocol === "goalctl-role-identity-intent-v2"
+          ? probeObservationFor(sealedIdentity)
+          : null;
+      if (probeObservation) {
+        sealedIdentity.probe_observation_binding_sha256 =
+          probeObservation.binding_sha256;
+      }
+      return {
+        ...structuredClone(event),
+        actor: {
+          ...structuredClone(event.actor),
+          thread_id: sealedIdentity.thread_id,
+          host_id: sealedIdentity.host_id,
+        },
+        payload: {
+          ...structuredClone(event.payload),
+          thread_id: sealedIdentity.thread_id,
+          host_id: sealedIdentity.host_id,
+          attempt: sealedIdentity.attempt,
+          launch_id: sealedIdentity.launch_id,
+          role_identity: sealedIdentity,
+          ...(probeObservation
+            ? { probe_observation: probeObservation }
+            : {}),
+        },
+      };
+    };
+
+    parity(withIdentity(identityV1), true);
+    parity(withIdentity(identityV2), true);
+    parity(withIdentity({
+      ...identityV2,
+      operation_id: "A".repeat(200),
+    }), true);
+    parity(withIdentity({
+      ...identityV2,
+      operation_id: "A".repeat(201),
+    }), false);
+    parity(withIdentity({
+      ...identityV2,
+      operation_id: "colon:intent",
+    }), false);
+    parity(withIdentity({
+      ...identityV2,
+      attempt: Number.MAX_SAFE_INTEGER,
+    }), true);
+    parity(withIdentity({
+      ...identityV2,
+      attempt: Number.MAX_SAFE_INTEGER + 1,
+    }), false);
+
+    const missingV1Launch = structuredClone(identityV1);
+    delete missingV1Launch.launch_id;
+    parity(withIdentity(missingV1Launch), false);
+    parity(withIdentity({
+      ...identityV1,
+      launch_id: "launch-not-null",
+    }), false);
+    parity(withIdentity({
+      ...identityV1,
+      semantic_slot_sha256: `sha256:${"3".repeat(64)}`,
+    }), false);
+    parity(withIdentity({
+      ...identityV1,
+      unexpected: "field",
+    }), false);
+
+    const missingV2Bundle = structuredClone(identityV2);
+    delete missingV2Bundle.bundle_sha256;
+    parity(withIdentity(missingV2Bundle), false);
+    const missingV2Probe = withIdentity(identityV2);
+    delete missingV2Probe.payload.probe_observation;
+    parity(missingV2Probe, false);
+    const missingV2Bootstrap = structuredClone(identityV2);
+    delete missingV2Bootstrap.worker_bootstrap_binding_sha256;
+    parity(withIdentity(missingV2Bootstrap), false);
+    parity(withIdentity({
+      ...identityV2,
+      worker_bootstrap_binding_sha256:
+        `sha256:${"c".repeat(64)}`,
+    }), false);
+    parity(withIdentity({
+      ...identityV2,
+      worker_bootstrap_authority_sha256:
+        `sha256:${"d".repeat(64)}`,
+    }), false);
+    parity(withIdentity({
+      ...identityV2,
+      worker_bootstrap_binding_sha256: undefined,
+    }), false);
+    parity(withIdentity({
+      ...identityV2,
+      extra_authority: `sha256:${"d".repeat(64)}`,
+    }), false);
   });
 
   it("defines the canonical sealed probe observation receipt contract", () => {
@@ -496,7 +1061,12 @@ describe("goal-control machine contract schemas", () => {
     expect(new Set(schemaPayloadKeys)).toEqual(new Set(runtimePayloadKeys));
     expect(schema.properties.payload.additionalProperties).toBe(false);
 
-    const conditionalContracts = Object.fromEntries(schema.allOf.map((entry: any) => {
+    const conditionalContracts = Object.fromEntries(schema.allOf
+      .filter((entry: any) => (
+        entry.then?.properties?.payload?.propertyNames
+          || entry.then?.properties?.payload?.maxProperties === 0
+      ))
+      .map((entry: any) => {
       const type = entry.if.properties.type.const as string;
       const payload = entry.then.properties.payload;
       return [type, {

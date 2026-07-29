@@ -167,6 +167,12 @@ function goalCommand(
       'issuer_capability_file',
       'identity_receipt',
       'identity_receipt_sha256',
+      'worker_bootstrap_receipt',
+      'worker_bootstrap_receipt_sha256',
+      'worker_bootstrap_operation_id',
+      'worker_bootstrap_challenge',
+      'worker_bootstrap_identity_plan_sha256',
+      'worker_worktree',
     ]);
     const unknown = Object.keys(args).filter((key) => !allowed.has(key));
     assertControl(
@@ -195,6 +201,32 @@ function goalCommand(
           args,
           'identity_receipt_sha256',
         ),
+        workerBootstrapReceipt:
+          args.worker_bootstrap_receipt === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_receipt'),
+        workerBootstrapReceiptSha256:
+          args.worker_bootstrap_receipt_sha256 === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_receipt_sha256'),
+        workerBootstrapOperationId:
+          args.worker_bootstrap_operation_id === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_operation_id'),
+        workerBootstrapChallenge:
+          args.worker_bootstrap_challenge === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_challenge'),
+        workerBootstrapIdentityPlanSha256:
+          args.worker_bootstrap_identity_plan_sha256 === undefined
+            ? null
+            : requireArg(
+              args,
+              'worker_bootstrap_identity_plan_sha256',
+            ),
+        workerWorktree: args.worker_worktree === undefined
+          ? null
+          : requireArg(args, 'worker_worktree'),
       }),
       exitCode: 0,
     };

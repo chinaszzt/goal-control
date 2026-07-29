@@ -1,15 +1,13 @@
 'use strict';
 
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { assertControl } = require('./errors');
+const { ControlError, assertControl } = require('./errors');
 const {
   assertNoSensitiveStringLeaves,
+  readStableFile,
 } = require('./canary-observation-receipt');
 const {
   canonicalJson,
-  hashFile,
   hashObject,
   normalizeHash,
   safeId,
@@ -21,6 +19,8 @@ const ROLES = new Set(['FOREMAN', 'CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT']);
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const RFC3339_UTC_MILLIS_RE =
   /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/;
+const PLATFORM_UUID_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function exactKeys(value, keys, label, code) {
   assertControl(
@@ -34,60 +34,27 @@ function exactKeys(value, keys, label, code) {
   );
 }
 
-function assertPrivateReceipt(file) {
+function controllerOpaqueId(value, label) {
   assertControl(
-    typeof file === 'string' && path.isAbsolute(file),
-    'ROLE_IDENTITY_OBSERVATION_INVALID',
-    'role identity observation 必须使用 absolute receipt path',
+    typeof value === 'string'
+      && value.length > 0
+      && value.length <= 200
+      && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value),
+    'ROLE_IDENTITY_OPAQUE_ID_INVALID',
+    `${label} 必须是 bounded controller opaque identifier`,
   );
-  let canonical;
-  try {
-    canonical = fs.realpathSync(file);
-  } catch {
-    assertControl(
-      false,
-      'ROLE_IDENTITY_OBSERVATION_INVALID',
-      'role identity observation receipt 不存在',
-    );
-  }
+  assertNoSensitiveStringLeaves(value);
+  return value;
+}
+
+function platformOpaqueId(value, label) {
+  assertNoSensitiveStringLeaves(value);
   assertControl(
-    canonical === path.normalize(file),
-    'ROLE_IDENTITY_OBSERVATION_INVALID',
-    'role identity observation receipt path 必须 canonical',
+    typeof value === 'string' && PLATFORM_UUID_ID_RE.test(value),
+    'ROLE_IDENTITY_OPAQUE_ID_INVALID',
+    `${label} 必须是 canonical platform UUID identifier`,
   );
-  const stat = fs.lstatSync(canonical);
-  const parent = fs.lstatSync(path.dirname(canonical));
-  assertControl(
-    stat.isFile()
-      && !stat.isSymbolicLink()
-      && stat.nlink === 1
-      && stat.size > 0
-      && stat.size <= MAX_RECEIPT_BYTES
-      && (stat.mode & 0o077) === 0
-      && parent.isDirectory()
-      && !parent.isSymbolicLink()
-      && (parent.mode & 0o077) === 0
-      && (
-        typeof process.getuid !== 'function'
-          || (stat.uid === process.getuid() && parent.uid === process.getuid())
-      ),
-    'ROLE_IDENTITY_OBSERVATION_INVALID',
-    'role identity observation receipt/parent 必须为当前 owner 私有普通对象',
-  );
-  return {
-    file: canonical,
-    identity_sha256: hashObject({
-      canonical_path_sha256: `sha256:${
-        crypto.createHash('sha256').update(canonical).digest('hex')
-      }`,
-      device: String(stat.dev),
-      inode: String(stat.ino),
-      size: stat.size,
-      uid: stat.uid,
-      mode: stat.mode & 0o777,
-      nlink: stat.nlink,
-    }),
-  };
+  return value;
 }
 
 function publicKey(hostAttestation) {
@@ -127,7 +94,8 @@ function canonicalTimestamp(value, label, code) {
     : Number.NaN;
   assertControl(
     Number.isFinite(milliseconds)
-      && RFC3339_UTC_MILLIS_RE.test(value),
+      && RFC3339_UTC_MILLIS_RE.test(value)
+      && new Date(milliseconds).toISOString() === value,
     code,
     `${label} 必须是 exact RFC3339 UTC millisecond timestamp`,
   );
@@ -186,11 +154,18 @@ function validateRoleIdentityObservationStructure(record) {
             record.worker_bootstrap_binding_sha256,
           )
       )
-      && record.attestation.algorithm === 'ED25519'
-      && safeId(
-        record.attestation.key_id,
-        'role identity observation attestation key_id',
+      && (
+        ['DEV', 'REVIEW', 'RECEIPT'].includes(record.role)
+          ? (
+            record.launch_id !== null
+              && record.worker_bootstrap_binding_sha256 !== null
+          )
+          : (
+            record.launch_id === null
+              && record.worker_bootstrap_binding_sha256 === null
+          )
       )
+      && record.attestation.algorithm === 'ED25519'
       && /^sha256:[0-9a-f]{64}$/.test(
         record.attestation.public_key_sha256 || '',
       )
@@ -205,15 +180,26 @@ function validateRoleIdentityObservationStructure(record) {
     [record.operation_id, 'operation_id'],
     [record.goal_id, 'goal_id'],
     [record.task_id, 'task_id'],
+  ]) {
+    controllerOpaqueId(value, `role identity observation ${label}`);
+  }
+  for (const [value, label] of [
     [record.thread_id, 'thread_id'],
     [record.host_id, 'host_id'],
     [record.session_id, 'session_id'],
   ]) {
-    safeId(value, `role identity observation ${label}`);
+    platformOpaqueId(value, `role identity observation ${label}`);
   }
   if (record.launch_id !== null) {
-    safeId(record.launch_id, 'role identity observation launch_id');
+    controllerOpaqueId(
+      record.launch_id,
+      'role identity observation launch_id',
+    );
   }
+  controllerOpaqueId(
+    record.attestation.key_id,
+    'role identity observation attestation key_id',
+  );
   assertActualIdentityAliases(record);
   canonicalTimestamp(
     record.observed_at,
@@ -228,11 +214,69 @@ function validateRoleIdentityObservationStructure(record) {
   return record;
 }
 
-function validateRoleIdentityObservation(options) {
-  const trustedFile = assertPrivateReceipt(options.receiptFile);
-  const file = trustedFile.file;
+function verifyRoleIdentityObservationRecord(record, hostAttestation) {
+  validateRoleIdentityObservationStructure(record);
+  const attestation = hostAttestation;
   assertControl(
-    hashFile(file) === normalizeHash(
+    attestation
+      && record.attestation.algorithm === attestation.algorithm
+      && record.attestation.key_id === attestation.key_id
+      && record.attestation.public_key_sha256
+        === attestation.public_key_sha256,
+    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
+    'role identity observation attestation authority 不匹配',
+  );
+  const sealed = { ...record };
+  delete sealed.record_sha256;
+  assertControl(
+    record.record_sha256 === hashObject(sealed),
+    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
+    'role identity observation record seal 不匹配',
+  );
+  const signed = {
+    ...sealed,
+    attestation: {
+      algorithm: sealed.attestation.algorithm,
+      key_id: sealed.attestation.key_id,
+      public_key_sha256: sealed.attestation.public_key_sha256,
+    },
+  };
+  assertControl(
+    crypto.verify(
+      null,
+      Buffer.from(canonicalJson(signed)),
+      publicKey(attestation),
+      Buffer.from(
+        record.attestation.signature_base64url,
+        'base64url',
+      ),
+    ),
+    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
+    'role identity observation signature 非法',
+  );
+  return record;
+}
+
+function validateRoleIdentityObservation(options) {
+  let trustedFile;
+  try {
+    trustedFile = options.trustedFile || readStableFile(
+      options.receiptFile,
+      {
+        label: 'role identity observation receipt',
+        parentMode: 0o700,
+        mode: 0o600,
+        maxBytes: MAX_RECEIPT_BYTES,
+      },
+    );
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_OBSERVATION_INVALID',
+      'role identity observation receipt file authority 非法',
+    );
+  }
+  assertControl(
+    trustedFile.sha256 === normalizeHash(
       options.receiptSha256,
       'role identity observation receipt sha256',
     ),
@@ -241,7 +285,7 @@ function validateRoleIdentityObservation(options) {
   );
   let record;
   try {
-    record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    record = JSON.parse(trustedFile.bytes.toString('utf8'));
   } catch {
     assertControl(
       false,
@@ -297,55 +341,24 @@ function validateRoleIdentityObservation(options) {
     'ROLE_IDENTITY_OBSERVATION_EXPIRED',
     'role identity observation 时间/TTL 非法、未来或已过期',
   );
-  const attestation = options.hostAttestation;
-  assertControl(
-    record.attestation.algorithm === attestation.algorithm
-      && record.attestation.key_id === attestation.key_id
-      && record.attestation.public_key_sha256
-        === attestation.public_key_sha256
-      && /^[A-Za-z0-9_-]{86}$/.test(
-        record.attestation.signature_base64url || '',
-      ),
-    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
-    'role identity observation attestation authority 不匹配',
-  );
-  const sealed = { ...record };
-  delete sealed.record_sha256;
-  assertControl(
-    record.record_sha256 === hashObject(sealed),
-    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
-    'role identity observation record seal 不匹配',
-  );
-  const signed = {
-    ...sealed,
-    attestation: {
-      algorithm: sealed.attestation.algorithm,
-      key_id: sealed.attestation.key_id,
-      public_key_sha256: sealed.attestation.public_key_sha256,
-    },
-  };
-  assertControl(
-    crypto.verify(
-      null,
-      Buffer.from(canonicalJson(signed)),
-      publicKey(attestation),
-      Buffer.from(
-        record.attestation.signature_base64url,
-        'base64url',
-      ),
-    ),
-    'ROLE_IDENTITY_OBSERVATION_AUTHENTICATION_INVALID',
-    'role identity observation signature 非法',
-  );
+  verifyRoleIdentityObservationRecord(record, options.hostAttestation);
   return {
     record: JSON.parse(JSON.stringify(record)),
-    receipt_file_identity_sha256: trustedFile.identity_sha256,
+    receipt_file_identity_sha256:
+      trustedFile.file_identity_sha256,
   };
 }
 
 function validateRoleIdentityIntent(value) {
   assertNoSensitiveStringLeaves(value);
-  exactKeys(value, [
+  const legacy = !Object.prototype.hasOwnProperty.call(
+    value,
+    'semantic_slot_sha256',
+  ) && !Object.prototype.hasOwnProperty.call(
+    value,
+    'worker_bootstrap',
+  );
+  const keys = [
     'schema_version',
     'kind',
     'operation_id',
@@ -367,12 +380,25 @@ function validateRoleIdentityIntent(value) {
     'issuer_authority',
     'created_at',
     'intent_sha256',
-  ], 'role identity intent', 'ROLE_IDENTITY_INTENT_INVALID');
+  ];
+  if (!legacy) {
+    keys.push(
+      'semantic_slot_sha256',
+      'worker_bootstrap',
+      'worker_bootstrap_authority',
+    );
+  }
+  exactKeys(
+    value,
+    keys,
+    'role identity intent',
+    'ROLE_IDENTITY_INTENT_INVALID',
+  );
   exactKeys(value.packet, [
     'revision',
     'sha256',
   ], 'role identity intent.packet', 'ROLE_IDENTITY_INTENT_INVALID');
-  exactKeys(value.identity_observation, [
+  const identityObservationKeys = [
     'receipt_sha256',
     'receipt_file_identity_sha256',
     'record_sha256',
@@ -380,8 +406,15 @@ function validateRoleIdentityIntent(value) {
     'observed_at',
     'expires_at',
     'worker_bootstrap_binding_sha256',
-  ], 'role identity intent.identity_observation', 'ROLE_IDENTITY_INTENT_INVALID');
-  exactKeys(value.issuer_authority, [
+  ];
+  if (!legacy) identityObservationKeys.push('signed_record');
+  exactKeys(
+    value.identity_observation,
+    identityObservationKeys,
+    'role identity intent.identity_observation',
+    'ROLE_IDENTITY_INTENT_INVALID',
+  );
+  const issuerKeys = [
     'kind',
     'capability_sha256',
     'source_task_id',
@@ -394,12 +427,62 @@ function validateRoleIdentityIntent(value) {
     'registration_event_id',
     'bootstrap_init_receipt_sha256',
     'recovery_scope_sha256',
-  ], 'role identity intent.issuer_authority', 'ROLE_IDENTITY_INTENT_INVALID');
+  ];
+  if (!legacy) issuerKeys.push('capability_file_identity_sha256');
+  exactKeys(
+    value.issuer_authority,
+    issuerKeys,
+    'role identity intent.issuer_authority',
+    'ROLE_IDENTITY_INTENT_INVALID',
+  );
   const unsigned = { ...value };
   delete unsigned.intent_sha256;
+  const workerBootstrap = legacy || value.worker_bootstrap === null
+    ? null
+    : require('./worker-bootstrap-binding')
+      .validateWorkerBootstrapBinding(
+        value.worker_bootstrap,
+        'role identity intent.worker_bootstrap',
+      );
+  if (!legacy && value.worker_bootstrap_authority !== null) {
+    exactKeys(
+      value.worker_bootstrap_authority,
+      [
+        'receipt_content_sha256',
+        'receipt_file_identity_sha256',
+        'intent_content_sha256',
+        'intent_file_identity_sha256',
+      ],
+      'role identity intent.worker_bootstrap_authority',
+      'ROLE_IDENTITY_INTENT_INVALID',
+    );
+  }
+  const semanticSlotSha256 = hashObject({
+    schema_version: 1,
+    kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
+    goal_id: value.goal_id,
+    task_id: value.task_id,
+    role: value.role,
+    attempt: value.attempt,
+    state_revision: value.state_revision,
+    control_epoch: value.control_epoch,
+    packet: value.packet,
+    base_head: value.base_head,
+    full_head: value.full_head,
+    task_cycle: value.task_cycle,
+  });
   assertControl(
     value.schema_version === 1
       && value.kind === INTENT_KIND
+      && (
+        legacy
+          || (
+            /^sha256:[0-9a-f]{64}$/.test(
+              value.semantic_slot_sha256 || '',
+            )
+              && value.semantic_slot_sha256 === semanticSlotSha256
+          )
+      )
       && ROLES.has(value.role)
       && Number.isSafeInteger(value.attempt)
       && value.attempt > 0
@@ -414,6 +497,38 @@ function validateRoleIdentityIntent(value) {
       && /^[0-9a-f]{40}$/.test(value.full_head || '')
       && Number.isSafeInteger(value.task_cycle)
       && value.task_cycle > 0
+      && (
+        legacy
+          || (
+        ['DEV', 'REVIEW', 'RECEIPT'].includes(value.role)
+          ? (
+            workerBootstrap
+              && value.worker_bootstrap_authority
+              && value.launch_id !== null
+              && workerBootstrap.thread === value.thread_id
+              && workerBootstrap.host === value.host_id
+              && workerBootstrap.operation_id === value.launch_id
+              && workerBootstrap.head === value.full_head
+              && workerBootstrap.binding_sha256
+                === value.identity_observation
+                  .worker_bootstrap_binding_sha256
+              && workerBootstrap.receipt_sha256
+                === value.worker_bootstrap_authority
+                  .receipt_content_sha256
+              && Object.values(value.worker_bootstrap_authority)
+                .every((candidate) => (
+                  /^sha256:[0-9a-f]{64}$/.test(candidate || '')
+                ))
+          )
+          : (
+            workerBootstrap === null
+              && value.worker_bootstrap_authority === null
+              && value.launch_id === null
+              && value.identity_observation
+                .worker_bootstrap_binding_sha256 === null
+          )
+          )
+      )
       && /^sha256:[0-9a-f]{64}$/.test(
         value.identity_observation.receipt_sha256 || '',
       )
@@ -423,8 +538,53 @@ function validateRoleIdentityIntent(value) {
       && /^sha256:[0-9a-f]{64}$/.test(
         value.identity_observation.record_sha256 || '',
       )
+      && (
+        legacy
+          || (
+            value.identity_observation.signed_record
+              && validateRoleIdentityObservationStructure(
+                value.identity_observation.signed_record,
+              )
+              && value.identity_observation.signed_record.record_sha256
+                === value.identity_observation.record_sha256
+              && value.identity_observation.signed_record.attestation.key_id
+                === value.identity_observation.attestation_key_id
+              && value.identity_observation.signed_record.observed_at
+                === value.identity_observation.observed_at
+              && value.identity_observation.signed_record.expires_at
+                === value.identity_observation.expires_at
+              && value.identity_observation.signed_record
+                .worker_bootstrap_binding_sha256
+                === value.identity_observation
+                  .worker_bootstrap_binding_sha256
+              && value.identity_observation.signed_record.operation_id
+                === value.operation_id
+              && value.identity_observation.signed_record.goal_id
+                === value.goal_id
+              && value.identity_observation.signed_record.task_id
+                === value.task_id
+              && value.identity_observation.signed_record.role === value.role
+              && value.identity_observation.signed_record.thread_id
+                === value.thread_id
+              && value.identity_observation.signed_record.host_id
+                === value.host_id
+              && value.identity_observation.signed_record.session_id
+                === value.session_id
+              && value.identity_observation.signed_record.launch_id
+                === value.launch_id
+              && value.identity_observation.signed_record.repository_head
+                === value.full_head
+          )
+      )
       && /^[0-9a-f]{64}$/.test(
         value.issuer_authority.capability_sha256 || '',
+      )
+      && (
+        legacy
+          || /^sha256:[0-9a-f]{64}$/.test(
+            value.issuer_authority
+              .capability_file_identity_sha256 || '',
+          )
       )
       && [
         'BOOTSTRAP',
@@ -451,9 +611,7 @@ function validateRoleIdentityIntent(value) {
           )
       )
       && (
-        !['SESSION', 'CURRENT_SESSION'].includes(
-          value.issuer_authority.kind,
-        )
+        !['SESSION', 'CURRENT_SESSION'].includes(value.issuer_authority.kind)
           || (
             value.issuer_authority.bootstrap_init_receipt_sha256 === null
               && value.issuer_authority.recovery_scope_sha256 === null
@@ -468,6 +626,35 @@ function validateRoleIdentityIntent(value) {
               )
           )
       )
+      && (
+        value.issuer_authority.kind !== 'BOOTSTRAP'
+          || value.role === 'FOREMAN'
+      )
+      && (
+        value.issuer_authority.kind !== 'GOAL_RECOVERY'
+          || (
+            value.role === 'FOREMAN'
+              && value.issuer_authority.role === 'FOREMAN'
+          )
+      )
+      && (
+        value.issuer_authority.kind !== 'CURRENT_SESSION'
+          || (
+            value.issuer_authority.role === value.role
+              && value.issuer_authority.thread_id === value.thread_id
+              && value.issuer_authority.host_id === value.host_id
+              && value.issuer_authority.attempt === value.attempt
+              && value.issuer_authority.session_id === value.session_id
+          )
+      )
+      && (
+        value.issuer_authority.kind !== 'SESSION'
+          || value.issuer_authority.role === (
+            ['FOREMAN', 'CAPTAIN'].includes(value.role)
+              ? 'FOREMAN'
+              : 'CAPTAIN'
+          )
+      )
       && value.intent_sha256 === hashObject(unsigned),
     'ROLE_IDENTITY_INTENT_INVALID',
     'role identity intent schema/hash/binding 非法',
@@ -476,16 +663,23 @@ function validateRoleIdentityIntent(value) {
     [value.operation_id, 'operation_id'],
     [value.goal_id, 'goal_id'],
     [value.task_id, 'task_id'],
+  ]) {
+    controllerOpaqueId(candidate, `role identity intent ${label}`);
+  }
+  for (const [candidate, label] of [
     [value.thread_id, 'thread_id'],
     [value.host_id, 'host_id'],
     [value.session_id, 'session_id'],
   ]) {
-    safeId(candidate, `role identity intent ${label}`);
+    platformOpaqueId(candidate, `role identity intent ${label}`);
   }
   if (value.launch_id !== null) {
-    safeId(value.launch_id, 'role identity intent launch_id');
+    controllerOpaqueId(
+      value.launch_id,
+      'role identity intent launch_id',
+    );
   }
-  safeId(
+  controllerOpaqueId(
     value.identity_observation.attestation_key_id,
     'role identity intent attestation_key_id',
   );
@@ -497,17 +691,23 @@ function validateRoleIdentityIntent(value) {
       'ROLE_IDENTITY_INTENT_INVALID',
       'role identity intent issuer session lineage 非法',
     );
+    controllerOpaqueId(
+      value.issuer_authority.source_task_id,
+      'role identity intent issuer source_task_id',
+    );
+    controllerOpaqueId(
+      value.issuer_authority.registration_event_id,
+      'role identity intent issuer registration_event_id',
+    );
     for (const [candidate, label] of [
-      [value.issuer_authority.source_task_id, 'source_task_id'],
       [value.issuer_authority.thread_id, 'thread_id'],
       [value.issuer_authority.host_id, 'host_id'],
       [value.issuer_authority.session_id, 'session_id'],
-      [
-        value.issuer_authority.registration_event_id,
-        'registration_event_id',
-      ],
     ]) {
-      safeId(candidate, `role identity intent issuer ${label}`);
+      platformOpaqueId(
+        candidate,
+        `role identity intent issuer ${label}`,
+      );
     }
     canonicalTimestamp(
       value.issuer_authority.lease_until,
@@ -538,12 +738,35 @@ function validateRoleIdentityIntent(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function roleIdentitySemanticSlotSha256(value) {
+  const intent = validateRoleIdentityIntent(value);
+  if (intent.semantic_slot_sha256) {
+    return intent.semantic_slot_sha256;
+  }
+  return hashObject({
+    schema_version: 1,
+    kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
+    goal_id: intent.goal_id,
+    task_id: intent.task_id,
+    role: intent.role,
+    attempt: intent.attempt,
+    state_revision: intent.state_revision,
+    control_epoch: intent.control_epoch,
+    packet: intent.packet,
+    base_head: intent.base_head,
+    full_head: intent.full_head,
+    task_cycle: intent.task_cycle,
+  });
+}
+
 function publicRoleIdentityIntent(value) {
   const intent = validateRoleIdentityIntent(value);
   return {
     schema_version: 1,
     kind: intent.kind,
     operation_id: intent.operation_id,
+    semantic_slot_sha256:
+      roleIdentitySemanticSlotSha256(intent),
     goal_id: intent.goal_id,
     task_id: intent.task_id,
     role: intent.role,
@@ -582,4 +805,8 @@ module.exports = {
   validateRoleIdentityIntent,
   validateRoleIdentityObservation,
   validateRoleIdentityObservationStructure,
+  verifyRoleIdentityObservationRecord,
+  controllerOpaqueId,
+  platformOpaqueId,
+  roleIdentitySemanticSlotSha256,
 };

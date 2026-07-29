@@ -23,8 +23,11 @@ function readCapabilityFile(file, expectedFile = null) {
   let resolved;
   try {
     resolved = fs.realpathSync(path.resolve(file));
-  } catch (error) {
-    throw new ControlError('CAPABILITY_INVALID', `capability file 不存在: ${error.message}`);
+  } catch {
+    throw new ControlError(
+      'CAPABILITY_INVALID',
+      'capability file 不存在或不可访问',
+    );
   }
   if (expectedFile) {
     let expected;

@@ -14,6 +14,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -47,6 +48,7 @@ const { goalCommand } = nodeRequire(
   goalCommand: (
     args: string[],
     cwd: string,
+    invocationCwd?: string,
   ) => { value: Record<string, any>; exitCode: number };
 };
 const {
@@ -154,6 +156,23 @@ function fileSha256(file: string): string {
   return `sha256:${createHash("sha256")
     .update(readFileSync(file))
     .digest("hex")}`;
+}
+
+function platformUuid(value: string): string {
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      .test(value)
+  ) {
+    return value;
+  }
+  const hex = createHash("sha256").update(value).digest("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `7${hex.slice(13, 16)}`,
+    `8${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join("-");
 }
 
 function writePrivateJson(file: string, value: unknown): void {
@@ -271,6 +290,7 @@ function roleIdentityObservation(
     launchId: string | null;
     workerBootstrapBindingSha256?: string | null;
     repositoryHead?: string;
+    rawIdentityIds?: boolean;
   },
 ): Record<string, any> {
   const hostAttestation =
@@ -283,9 +303,15 @@ function roleIdentityObservation(
     goal_id: "goal-receipt-integration",
     task_id: values.taskId,
     role: values.role,
-    thread_id: values.threadId,
-    host_id: values.hostId,
-    session_id: values.sessionId,
+    thread_id: values.rawIdentityIds
+      ? values.threadId
+      : platformUuid(values.threadId),
+    host_id: values.rawIdentityIds
+      ? values.hostId
+      : platformUuid(values.hostId),
+    session_id: values.rawIdentityIds
+      ? values.sessionId
+      : platformUuid(values.sessionId),
     launch_id: values.launchId,
     repository_head:
       values.repositoryHead || repository.manifest.base_head,
@@ -351,6 +377,7 @@ function resealRoleIdentityObservation(
 function runGoalctlProcess(
   cwd: string,
   args: string[],
+  environment: Record<string, string> = {},
 ): {
   status: number | null;
   stdout: string;
@@ -362,7 +389,7 @@ function runGoalctlProcess(
     {
       cwd,
       encoding: "utf8",
-      env: { ...process.env },
+      env: { ...process.env, ...environment },
     },
   );
   return {
@@ -414,6 +441,8 @@ function registerControlAuthority(
     sessionId: `codex-session-${role.toLowerCase()}-real-1`,
     launchId: null,
   });
+  const actualThreadId = identity.thread_id;
+  const actualHostId = identity.host_id;
   const identityFile = path.join(
     artifactRoot,
     `${eventId}-identity.json`,
@@ -439,8 +468,8 @@ function registerControlAuthority(
     goalId: "goal-receipt-integration",
     taskId,
     role,
-    threadId,
-    hostId,
+    threadId: actualThreadId,
+    hostId: actualHostId,
     attempt: 1,
     repositoryHead: repository.fullHead,
     repositoryWorktree: repository.root,
@@ -497,8 +526,8 @@ function registerControlAuthority(
     "--goal", "goal-receipt-integration",
     "--task", taskId,
     "--role", role,
-    "--thread", threadId,
-    "--host", hostId,
+    "--thread", actualThreadId,
+    "--host", actualHostId,
     "--attempt", "1",
     "--event-id", eventId,
     ...authArgs,
@@ -543,12 +572,14 @@ function prepareRoleIdentityChallenge(
     taskId: values.role === "FOREMAN" ? null : values.taskId,
     browserCanaryReceipt: null,
   });
+  const actualThreadId = platformUuid(values.threadId);
+  const actualHostId = platformUuid(values.hostId);
   const identity = roleIdentityObservation(repository, {
     operationId: values.operationId,
     taskId: values.taskId,
     role: values.role,
-    threadId: values.threadId,
-    hostId: values.hostId,
+    threadId: actualThreadId,
+    hostId: actualHostId,
     sessionId: values.sessionId,
     launchId: values.launchId,
     workerBootstrapBindingSha256:
@@ -598,6 +629,8 @@ function prepareWorkerBootstrap(
   planEnvelope: Record<string, any>;
 } {
   const role = values.role || "DEV";
+  const actualThreadId = platformUuid(values.threadId);
+  const actualHostId = platformUuid(values.hostId);
   const expectedHead = loadGoalStateReadOnly(
     repository.root,
     "goal-receipt-integration",
@@ -630,8 +663,8 @@ function prepareWorkerBootstrap(
     ...bindingArgs,
     "--expected-identity-plan-sha256",
     identityPlan.identity_plan_sha256,
-    "--worker-thread", values.threadId,
-    "--worker-host", values.hostId,
+    "--worker-thread", actualThreadId,
+    "--worker-host", actualHostId,
     "--json",
   ], worker).value);
   const prepared = withoutGoalControlDirectory(() => goalCommand([
@@ -642,8 +675,8 @@ function prepareWorkerBootstrap(
     identityPlan.identity_plan_sha256,
     "--expected-observation-sha256",
     identityObservation.identity_observation_sha256,
-    "--worker-thread", values.threadId,
-    "--worker-host", values.hostId,
+    "--worker-thread", actualThreadId,
+    "--worker-host", actualHostId,
     "--worker-worktree", worker,
     "--json",
   ], frozenRepositoryWorktree).value);
@@ -664,17 +697,18 @@ function prepareWorkerBootstrap(
     "--worker-bootstrap-challenge", values.challenge,
     "--worker-bootstrap-identity-plan-sha256",
     identityPlan.identity_plan_sha256,
-    "--worker-thread", values.threadId,
-    "--worker-host", values.hostId,
+    "--worker-thread", actualThreadId,
+    "--worker-host", actualHostId,
     "--json",
   ], frozenRepositoryWorktree, worker).value);
+  const binding = sealWorkerBootstrapBinding(
+    planEnvelope.canary_plan.worker_bootstrap,
+  );
   return {
     receiptFile: prepared.worker_bootstrap_receipt_file,
     receiptSha256: prepared.worker_bootstrap_receipt_sha256,
     identityPlanSha256: identityPlan.identity_plan_sha256,
-    binding: sealWorkerBootstrapBinding(
-      planEnvelope.canary_plan.worker_bootstrap,
-    ),
+    binding,
     planEnvelope,
   };
 }
@@ -731,6 +765,8 @@ function registerWorkerIdentity(
         || bootstrap.binding.binding_sha256,
     repositoryHead: bootstrap.binding.head,
   });
+  const actualThreadId = identity.thread_id;
+  const actualHostId = identity.host_id;
   const identityFile = path.join(
     artifacts,
     `${values.eventId}-identity.json`,
@@ -748,6 +784,16 @@ function registerWorkerIdentity(
     String(captain.actor_capability_file),
     "--identity-receipt", identityFile,
     "--identity-receipt-sha256", fileSha256(identityFile),
+    "--worker-bootstrap-receipt", bootstrap.receiptFile,
+    "--worker-bootstrap-receipt-sha256",
+    bootstrap.receiptSha256,
+    "--worker-bootstrap-operation-id",
+    bootstrap.binding.operation_id,
+    "--worker-bootstrap-challenge",
+    bootstrap.binding.challenge,
+    "--worker-bootstrap-identity-plan-sha256",
+    bootstrap.identityPlanSha256,
+    "--worker-worktree", worker,
     "--json",
   ], frozenRepositoryWorktree).value;
   const receiptOptions = {
@@ -755,8 +801,8 @@ function registerWorkerIdentity(
     goalId: "goal-receipt-integration",
     taskId: "TASK-A",
     role: "DEV",
-    threadId: values.threadId,
-    hostId: values.hostId,
+    threadId: actualThreadId,
+    hostId: actualHostId,
     attempt: values.attempt,
     repositoryHead: bootstrap.binding.head,
     repositoryWorktree: frozenRepositoryWorktree,
@@ -790,8 +836,8 @@ function registerWorkerIdentity(
     "--goal", "goal-receipt-integration",
     "--task", "TASK-A",
     "--role", "DEV",
-    "--thread", values.threadId,
-    "--host", values.hostId,
+    "--thread", actualThreadId,
+    "--host", actualHostId,
     "--attempt", String(values.attempt),
     "--launch-id", values.registrationLaunchId || values.launchId,
     "--event-id", values.eventId,
@@ -828,6 +874,7 @@ function fixture(
     initialized?: Record<string, any>;
     productionHost?: boolean;
     eventTag?: string;
+    receiptOnly?: boolean;
   } = {},
 ): Fixture {
   delete process.env.GOAL_CONTROL_DIR;
@@ -866,7 +913,7 @@ function fixture(
   ].join("-");
   let issuerCapabilityFile =
     String(initialized.bootstrap_capability_file);
-  if (role !== "FOREMAN") {
+  if (role !== "FOREMAN" && !overrides.receiptOnly) {
     const foreman = registerControlAuthority(
       repository,
       initialized,
@@ -899,26 +946,72 @@ function fixture(
   });
   const identityFile = path.join(root, "role-identity.json");
   writePrivateJson(identityFile, identityObservation);
-  const challengeRecord = goalCommand([
-    "prepare-probe-observation-challenge",
-    "--goal", goalId,
-    "--task", taskId,
-    "--role", role,
-    "--event-id", eventId,
-    "--canary-plan-sha256", planEnvelope.canary_plan_sha256,
-    "--issuer-capability-file",
-    issuerCapabilityFile,
-    "--identity-receipt", identityFile,
-    "--identity-receipt-sha256", fileSha256(identityFile),
-    "--json",
-  ], repository.root).value;
+  const challengeRecord = (
+    overrides.receiptOnly
+      || ["DEV", "REVIEW", "RECEIPT"].includes(role)
+  )
+    ? (() => {
+      // Direct receipt-validator fixtures do not model a controller launch.
+      // Public worker producer/registration lanes below use the real
+      // upstream bootstrap transaction and CLI.
+      const issuedAt = new Date().toISOString();
+      const unsigned = {
+        schema_version: 1,
+        kind: "PROBE_OBSERVATION_CHALLENGE",
+        goal_id: goalId,
+        task_id: taskId,
+        role,
+        thread_id: identityObservation.thread_id,
+        host_id: identityObservation.host_id,
+        attempt: 1,
+        registration_event_id: eventId,
+        canary_plan_sha256: planEnvelope.canary_plan_sha256,
+        producer_namespace: "ISOLATED_TEST_FAKE",
+        issuer_capability_sha256: overrides.receiptOnly
+          ? "0".repeat(64)
+          : createHash("sha256")
+            .update(readFileSync(issuerCapabilityFile, "utf8").trim())
+            .digest("hex"),
+        attestation_algorithm: repository.manifest
+          .probe_observation_receipts.host_attestation.algorithm,
+        attestation_key_id: repository.manifest
+          .probe_observation_receipts.host_attestation.key_id,
+        attestation_public_key_sha256: repository.manifest
+          .probe_observation_receipts.host_attestation.public_key_sha256,
+        challenge: createHash("sha256")
+          .update(`direct-validator:${eventId}`)
+          .digest("hex"),
+        issued_at: issuedAt,
+        expires_at: new Date(
+          Date.parse(issuedAt)
+            + repository.manifest.probe_observation_receipts.max_ttl_ms,
+        ).toISOString(),
+      };
+      return {
+        ...unsigned,
+        record_sha256: hashObject(unsigned),
+      };
+    })()
+    : goalCommand([
+      "prepare-probe-observation-challenge",
+      "--goal", goalId,
+      "--task", taskId,
+      "--role", role,
+      "--event-id", eventId,
+      "--canary-plan-sha256", planEnvelope.canary_plan_sha256,
+      "--issuer-capability-file",
+      issuerCapabilityFile,
+      "--identity-receipt", identityFile,
+      "--identity-receipt-sha256", fileSha256(identityFile),
+      "--json",
+    ], repository.root).value;
   const options: Record<string, any> = {
     registrationEventId: eventId,
     goalId,
     taskId,
     role,
-    threadId: `${role.toLowerCase()}-thread-1`,
-    hostId: "host-1",
+    threadId: identityObservation.thread_id,
+    hostId: identityObservation.host_id,
     attempt: 1,
     repositoryHead: repository.fullHead,
     repositoryWorktree: repository.root,
@@ -1389,8 +1482,8 @@ describe("sealed probe observation receipt", () => {
       aggregate_disposition: "PASS",
       stable_id: current.options.probeObservationStableId,
       challenge: current.options.probeObservationChallenge,
-      thread_id: "dev-thread-1",
-      host_id: "host-1",
+      thread_id: platformUuid("dev-thread-1"),
+      host_id: platformUuid("host-1"),
       attempt: 1,
       plan_file: expect.stringContaining("direct-evidence-dev"),
       receipt_file: expect.stringContaining("direct-evidence-dev"),
@@ -1410,7 +1503,7 @@ describe("sealed probe observation receipt", () => {
       taskId: "TASK-A",
     });
     expect(observation.validateReceipt(current.options)).toMatchObject({
-      thread_id: "foreman-thread-1",
+      thread_id: platformUuid("foreman-thread-1"),
       aggregate_disposition: "PASS",
     });
   });
@@ -1776,6 +1869,7 @@ describe("sealed probe observation receipt", () => {
       role: "DEV",
       repository: captainReceipt.repository,
       initialized: captainReceipt.initialized,
+      receiptOnly: true,
       receiptOverrides: { ttlMs: 100_000 },
     });
     const captainBinding =
@@ -1794,16 +1888,16 @@ describe("sealed probe observation receipt", () => {
     state.sessions = {
       CAPTAIN: {
         role: "CAPTAIN",
-        thread_id: "captain-thread-1",
-        host_id: "host-1",
+        thread_id: captainBinding.thread_id,
+        host_id: captainBinding.host_id,
         attempt: 1,
         status: "active",
         probe_observation: captainBinding,
       },
       DEV: {
         role: "DEV",
-        thread_id: "dev-thread-1",
-        host_id: "host-1",
+        thread_id: devBinding.thread_id,
+        host_id: devBinding.host_id,
         attempt: 1,
         status: "active",
         launch_id: "launch-dev-receipt-gate",
@@ -1840,8 +1934,8 @@ describe("sealed probe observation receipt", () => {
       type: "LAUNCH_DEV",
       actor: {
         role: "DEV",
-        thread_id: "dev-thread-1",
-        host_id: "host-1",
+        thread_id: devBinding.thread_id,
+        host_id: devBinding.host_id,
       },
       accepted_at: new Date().toISOString(),
       payload: { launch_id: "launch-dev-receipt-gate" },
@@ -1860,8 +1954,8 @@ describe("sealed probe observation receipt", () => {
       ...wrongActor,
       actor: {
         role: "CAPTAIN",
-        thread_id: "captain-thread-1",
-        host_id: "host-1",
+        thread_id: captainBinding.thread_id,
+        host_id: captainBinding.host_id,
       },
       accepted_at: captainBinding.expires_at,
     };
@@ -1934,6 +2028,7 @@ describe("sealed probe observation receipt", () => {
         eventTag: "projection-long",
         repository: captainShort.repository,
         initialized: captainShort.initialized,
+        receiptOnly: true,
         receiptOverrides: { ttlMs: 90_000 },
       });
       const targetShort = fixture({
@@ -1941,6 +2036,7 @@ describe("sealed probe observation receipt", () => {
         eventTag: "projection-short",
         repository: captainShort.repository,
         initialized: captainShort.initialized,
+        receiptOnly: true,
         receiptOverrides: { ttlMs: 30_000 },
       });
       const targetLong = fixture({
@@ -1948,6 +2044,7 @@ describe("sealed probe observation receipt", () => {
         eventTag: "projection-long",
         repository: captainShort.repository,
         initialized: captainShort.initialized,
+        receiptOnly: true,
         receiptOverrides: { ttlMs: 90_000 },
       });
       const bindings = {
@@ -1975,8 +2072,10 @@ describe("sealed probe observation receipt", () => {
         state.sessions = {
           CAPTAIN: {
             role: "CAPTAIN",
-            thread_id: "captain-thread-1",
-            host_id: "host-1",
+            thread_id:
+              (captainBinding || bindings.captainLong).thread_id,
+            host_id:
+              (captainBinding || bindings.captainLong).host_id,
             attempt: 1,
             status: "active",
             ...(captainBinding
@@ -1985,8 +2084,10 @@ describe("sealed probe observation receipt", () => {
           },
           [targetRole]: {
             role: targetRole,
-            thread_id: `${targetRole.toLowerCase()}-thread-1`,
-            host_id: "host-1",
+            thread_id:
+              (targetBinding || bindings.targetLong).thread_id,
+            host_id:
+              (targetBinding || bindings.targetLong).host_id,
             attempt: 1,
             status: "idle",
             ...(targetBinding
@@ -2351,7 +2452,10 @@ describe("sealed probe observation receipt", () => {
   });
 
   test("same-UID roles cannot discover a signer or forge HOST_ADAPTER receipts", () => {
-    const current = fixture({ productionHost: true });
+    const current = fixture({
+      productionHost: true,
+      role: "FOREMAN",
+    });
     const binding = observation.validateReceipt(current.options);
     const loaded = loadGoalStateReadOnly(
       current.repository.root,
@@ -2450,6 +2554,124 @@ describe("sealed probe observation receipt", () => {
       .toEqual(beforeReplacementRetry);
   });
 
+  test("reauthenticates deleted, replaced, and expired issuer authority on exact retry", () => {
+    for (const mutation of ["deleted", "replaced"] as const) {
+      const current = fixture({
+        role: "FOREMAN",
+        eventTag: `issuer-${mutation}`,
+      });
+      const args = [
+        "prepare-probe-observation-challenge",
+        "--goal", current.options.goalId,
+        "--task", current.options.taskId,
+        "--role", "FOREMAN",
+        "--event-id", current.options.registrationEventId,
+        "--canary-plan-sha256",
+        current.options.probeObservationPlanSha256,
+        "--issuer-capability-file",
+        String(current.initialized.bootstrap_capability_file),
+        "--identity-receipt", current.identityFile,
+        "--identity-receipt-sha256",
+        fileSha256(current.identityFile),
+        "--json",
+      ];
+      const issuerFile = String(
+        current.initialized.bootstrap_capability_file,
+      );
+      const issuerBytes = readFileSync(issuerFile);
+      unlinkSync(issuerFile);
+      if (mutation === "replaced") {
+        writeFileSync(issuerFile, issuerBytes, { mode: 0o600 });
+        chmodSync(issuerFile, 0o600);
+      }
+      const beforeRetry = ordinaryFileSnapshot(
+        current.repository.controlDir,
+      );
+      expect(() => goalCommand(args, current.repository.root))
+        .toThrow();
+      expect(ordinaryFileSnapshot(current.repository.controlDir))
+        .toEqual(beforeRetry);
+    }
+
+    const repository = integrationRepository();
+    process.env.GOAL_CONTROL_DIR = repository.controlDir;
+    process.env.GOAL_CONTROL_TEST_MODE = "1";
+    const initialized = goalCommand([
+      "init",
+      "--manifest", repository.manifestFile,
+      "--json",
+    ], repository.root).value;
+    const artifacts = realpathSync(mkdtempSync(
+      path.join(tmpdir(), "goal-role-identity-expired-issuer-"),
+    ));
+    roots.push(artifacts);
+    chmodSync(artifacts, 0o700);
+    const foreman = registerControlAuthority(
+      repository,
+      initialized,
+      artifacts,
+      "FOREMAN",
+      null,
+    );
+    const fixedNow = new Date(Date.now() + 1_000).toISOString();
+    process.env.GOAL_CONTROL_NOW = fixedNow;
+    submitPublicGoalEvent(repository, artifacts, {
+      eventId: "shorten-foreman-issuer-lease",
+      type: "HEARTBEAT",
+      actorRole: "FOREMAN",
+      actorCapabilityFile:
+        String(foreman.actor_capability_file),
+      payload: {
+        lease_ms: 5_000,
+        status: "active",
+      },
+    });
+    const liveForeman = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (loaded) => loaded.snapshot.tasks["TASK-A"].sessions.FOREMAN,
+    );
+    const prepared = prepareRoleIdentityChallenge(
+      repository,
+      artifacts,
+      {
+        operationId: "captain-expired-issuer-retry-1",
+        taskId: "TASK-A",
+        role: "CAPTAIN",
+        threadId: "actual-captain-expired-issuer-thread",
+        hostId: "actual-captain-expired-issuer-host",
+        sessionId: "actual-captain-expired-issuer-session",
+        launchId: null,
+        issuerCapabilityFile:
+          String(foreman.actor_capability_file),
+      },
+    );
+    const retryArgs = [
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--event-id", "captain-expired-issuer-retry-1",
+      "--canary-plan-sha256",
+      prepared.planEnvelope.canary_plan_sha256,
+      "--issuer-capability-file",
+      String(foreman.actor_capability_file),
+      "--identity-receipt", prepared.identityFile,
+      "--identity-receipt-sha256",
+      fileSha256(prepared.identityFile),
+      "--json",
+    ];
+    process.env.GOAL_CONTROL_NOW = liveForeman.lease_until;
+    const beforeExpiredRetry = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(() => goalCommand(retryArgs, repository.root))
+      .toThrow();
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeExpiredRetry);
+    delete process.env.GOAL_CONTROL_NOW;
+  });
+
   test("seals only pre-attested identity and projects it with zero public writes", () => {
     const current = fixture({ role: "FOREMAN" });
     const beforeReads = ordinaryFileSnapshot(
@@ -2495,6 +2717,100 @@ describe("sealed probe observation receipt", () => {
     expect(serialized).not.toContain("capability_sha256");
     expect(serialized).not.toContain("signature_base64url");
     expect(serialized).not.toContain("public_key_spki_base64");
+
+    const identityDirectory = loadGoalStateReadOnly(
+      current.repository.root,
+      current.options.goalId,
+      (loaded) => loaded.paths.roleIdentityIntents,
+    );
+    const currentBundleFile = readdirSync(identityDirectory)
+      .map((name) => path.join(identityDirectory, name))
+      .find((file) => (
+        file.endsWith(".role-identity-bundle.json")
+          && JSON.parse(readFileSync(file, "utf8")).operation_id
+            === current.options.registrationEventId
+      ));
+    expect(currentBundleFile).toBeTruthy();
+    const currentBundle = JSON.parse(readFileSync(
+      String(currentBundleFile),
+      "utf8",
+    ));
+    const legacyIntent = structuredClone(currentBundle.intent);
+    delete legacyIntent.semantic_slot_sha256;
+    delete legacyIntent.worker_bootstrap;
+    delete legacyIntent.worker_bootstrap_authority;
+    delete legacyIntent.identity_observation.signed_record;
+    delete legacyIntent.issuer_authority
+      .capability_file_identity_sha256;
+    delete legacyIntent.intent_sha256;
+    legacyIntent.intent_sha256 = hashObject(legacyIntent);
+    const legacyIntentFile = path.join(
+      identityDirectory,
+      `${createHash("sha256")
+        .update(legacyIntent.operation_id)
+        .digest("hex")}.role-identity-intent.json`,
+    );
+    writePrivateJson(legacyIntentFile, legacyIntent);
+    const beforeMixedRead = ordinaryFileSnapshot(
+      current.repository.controlDir,
+    );
+    expect(() => goalCommand([
+      "status",
+      "--goal", current.options.goalId,
+      "--json",
+    ], current.repository.root)).toThrow(expect.objectContaining({
+      code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+    }));
+    expect(ordinaryFileSnapshot(current.repository.controlDir))
+      .toEqual(beforeMixedRead);
+    unlinkSync(legacyIntentFile);
+
+    const duplicateEventId = "register-foreman-receipt-variant";
+    const duplicateIdentity = roleIdentityObservation(
+      current.repository,
+      {
+        operationId: duplicateEventId,
+        taskId: current.options.taskId,
+        role: "FOREMAN",
+        threadId: "019fabbe-3b38-7a23-8d8f-8c392bced038",
+        hostId: "actual-host-duplicate-slot",
+        sessionId: "019fae5f-a8f0-7223-8fa0-0d4ebf7b1233",
+        launchId: null,
+      },
+    );
+    const duplicateFile = path.join(
+      current.root,
+      "duplicate-semantic-slot.json",
+    );
+    writePrivateJson(duplicateFile, duplicateIdentity);
+    const issuerPath = String(
+      current.initialized.bootstrap_capability_file,
+    );
+    const issuerBytes = readFileSync(issuerPath);
+    unlinkSync(issuerPath);
+    writeFileSync(issuerPath, issuerBytes, { mode: 0o600 });
+    chmodSync(issuerPath, 0o600);
+    const beforeDuplicate = ordinaryFileSnapshot(
+      current.repository.controlDir,
+    );
+    expect(() => goalCommand([
+      "prepare-probe-observation-challenge",
+      "--goal", current.options.goalId,
+      "--task", current.options.taskId,
+      "--role", "FOREMAN",
+      "--event-id", duplicateEventId,
+      "--canary-plan-sha256",
+      current.options.probeObservationPlanSha256,
+      "--issuer-capability-file",
+      issuerPath,
+      "--identity-receipt", duplicateFile,
+      "--identity-receipt-sha256", fileSha256(duplicateFile),
+      "--json",
+    ], current.repository.root)).toThrow(expect.objectContaining({
+      code: "CANARY_OBSERVATION_REPLAY_CONFLICT",
+    }));
+    expect(ordinaryFileSnapshot(current.repository.controlDir))
+      .toEqual(beforeDuplicate);
   });
 
   test("preserves the canonical source task for a two-task Goal-wide FOREMAN intent", () => {
@@ -2551,12 +2867,12 @@ describe("sealed probe observation receipt", () => {
       loaded.paths.roleIdentityIntents,
     )
       .filter((name) => (
-        name.endsWith(".role-identity-intent.json")
+        name.endsWith(".role-identity-bundle.json")
       ))
       .map((name) => JSON.parse(readFileSync(
         path.join(loaded.paths.roleIdentityIntents, name),
         "utf8",
-      )))
+      )).intent)
       .find((candidate) => candidate.operation_id === operationId);
     expect(intent).toMatchObject({
       task_id: "TASK-B",
@@ -2707,7 +3023,7 @@ describe("sealed probe observation receipt", () => {
         operation_id: "lost-captain-successor-2",
         role: "CAPTAIN",
         attempt: 2,
-        thread_id: "actual-captain-lost-2",
+        thread_id: platformUuid("actual-captain-lost-2"),
       });
 
     const terminalCase = setup();
@@ -2763,7 +3079,7 @@ describe("sealed probe observation receipt", () => {
         operation_id: "terminal-captain-successor-2",
         role: "CAPTAIN",
         attempt: 2,
-        thread_id: "actual-captain-terminal-2",
+        thread_id: platformUuid("actual-captain-terminal-2"),
       });
   });
 
@@ -2802,7 +3118,7 @@ describe("sealed probe observation receipt", () => {
     });
     const identityFile = path.join(artifacts, "identity.json");
     writePrivateJson(identityFile, identity);
-    const prepare = runGoalctlProcess(repository.root, [
+    const prepareArgs = [
       "prepare-probe-observation-challenge",
       "--goal", "goal-receipt-integration",
       "--task", "TASK-A",
@@ -2814,16 +3130,58 @@ describe("sealed probe observation receipt", () => {
       "--identity-receipt", identityFile,
       "--identity-receipt-sha256", fileSha256(identityFile),
       "--json",
-    ]);
+    ];
+    const faulted = runGoalctlProcess(
+      repository.root,
+      prepareArgs,
+      {
+        GOAL_CONTROL_TEST_FAULT_AFTER_ROLE_IDENTITY_GENERATION:
+          "exit",
+      },
+    );
+    expect(faulted.status).toBe(86);
+    expect(faulted.stdout).toBe("");
+    expect(Object.keys(ordinaryFileSnapshot(
+      repository.controlDir,
+    )).some((name) => (
+      name.endsWith(".role-identity-bundle.json")
+    ))).toBe(false);
+    const prepare = runGoalctlProcess(
+      repository.root,
+      prepareArgs,
+    );
     expect({ status: prepare.status, stderr: prepare.stderr })
       .toEqual({ status: 0, stderr: "" });
     expect(JSON.parse(prepare.stdout)).toMatchObject({
       goal_id: "goal-receipt-integration",
       task_id: "TASK-A",
       role: "FOREMAN",
-      thread_id: "actual-process-foreman-thread-1",
-      host_id: "actual-process-host-1",
+      thread_id: platformUuid("actual-process-foreman-thread-1"),
+      host_id: platformUuid("actual-process-host-1"),
     });
+    const afterRecoveredPublication = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    const exactPrepare = runGoalctlProcess(
+      repository.root,
+      prepareArgs,
+    );
+    expect({
+      status: exactPrepare.status,
+      stderr: exactPrepare.stderr,
+    }).toEqual({ status: 0, stderr: "" });
+    expect(JSON.parse(exactPrepare.stdout))
+      .toEqual(JSON.parse(prepare.stdout));
+    const afterExactReplay = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(Object.fromEntries(Object.entries(afterExactReplay).filter(
+      ([name]) => name.endsWith(".role-identity-bundle.json"),
+    ))).toEqual(Object.fromEntries(
+      Object.entries(afterRecoveredPublication).filter(
+        ([name]) => name.endsWith(".role-identity-bundle.json"),
+      ),
+    ));
     const beforeReads = ordinaryFileSnapshot(repository.controlDir);
     for (let index = 0; index < 2; index += 1) {
       const status = runGoalctlProcess(repository.root, [
@@ -2886,6 +3244,69 @@ describe("sealed probe observation receipt", () => {
     expect(rejected.stderr).not.toContain(secret);
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeSecret);
+  });
+
+  test("binds odd-generation retry to the exact trusted input inode", () => {
+    const repository = integrationRepository();
+    process.env.GOAL_CONTROL_DIR = repository.controlDir;
+    process.env.GOAL_CONTROL_TEST_MODE = "1";
+    const initialized = goalCommand([
+      "init",
+      "--manifest", repository.manifestFile,
+      "--json",
+    ], repository.root).value;
+    const artifacts = realpathSync(mkdtempSync(
+      path.join(tmpdir(), "goal-role-identity-inode-"),
+    ));
+    roots.push(artifacts);
+    chmodSync(artifacts, 0o700);
+    const plan = canaryPlan(repository.root, {
+      manifestFile: path.relative(
+        repository.root,
+        repository.manifestFile,
+      ),
+      role: "FOREMAN",
+      taskId: null,
+      browserCanaryReceipt: null,
+    });
+    const operationId = "process-foreman-inode-1";
+    const identityFile = path.join(artifacts, "identity.json");
+    writePrivateJson(identityFile, roleIdentityObservation(repository, {
+      operationId,
+      taskId: "TASK-A",
+      role: "FOREMAN",
+      threadId: "actual-process-inode-thread-1",
+      hostId: "actual-process-inode-host-1",
+      sessionId: "actual-process-inode-session-1",
+      launchId: null,
+    }));
+    const prepareArgs = [
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "FOREMAN",
+      "--event-id", operationId,
+      "--canary-plan-sha256", plan.canary_plan_sha256,
+      "--issuer-capability-file",
+      String(initialized.bootstrap_capability_file),
+      "--identity-receipt", identityFile,
+      "--identity-receipt-sha256", fileSha256(identityFile),
+      "--json",
+    ];
+    expect(runGoalctlProcess(repository.root, prepareArgs, {
+      GOAL_CONTROL_TEST_FAULT_AFTER_ROLE_IDENTITY_GENERATION: "exit",
+    }).status).toBe(86);
+    const originalBytes = readFileSync(identityFile);
+    unlinkSync(identityFile);
+    writeFileSync(identityFile, originalBytes, { mode: 0o600 });
+    chmodSync(identityFile, 0o600);
+    expect(runGoalctlProcess(repository.root, prepareArgs).status).toBe(2);
+    const beforeRepeatedConflict = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(runGoalctlProcess(repository.root, prepareArgs).status).toBe(2);
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeRepeatedConflict);
   });
 
   test("rejects signed-observation binding, authentication, TTL, and replay variants with zero writes", () => {
@@ -3244,7 +3665,7 @@ describe("sealed probe observation receipt", () => {
       mismatch.p1.worktree,
       mismatchWorkerA,
       {
-        operationId: "bootstrap-dev-mismatch-a",
+        operationId: "launch-dev-cross-bootstrap-a",
         challenge: "a1".repeat(32),
         threadId: "actual-dev-mismatch-thread-a",
         hostId: "actual-dev-mismatch-host-a",
@@ -3265,7 +3686,9 @@ describe("sealed probe observation receipt", () => {
         hostId: "actual-dev-mismatch-host-b",
       },
     );
-    let beforeCrossBinding: Record<string, string> = {};
+    const beforeCrossBinding = ordinaryFileSnapshot(
+      mismatch.repository.controlDir,
+    );
     expect(() => registerWorkerIdentity(
       mismatch.repository,
       mismatch.p1.worktree,
@@ -3281,19 +3704,16 @@ describe("sealed probe observation receipt", () => {
         launchId: "launch-dev-cross-bootstrap-a",
         observedBootstrapBindingSha256:
           mismatchBootstrapB.binding.binding_sha256,
-        beforeRegister: () => {
-          beforeCrossBinding = ordinaryFileSnapshot(
-            mismatch.repository.controlDir,
-          );
-        },
       },
     )).toThrow(expect.objectContaining({
-      code: "ROLE_IDENTITY_WORKER_BOOTSTRAP_MISMATCH",
+      code: "ROLE_IDENTITY_WORKER_AUTHORITY_MISMATCH",
     }));
     expect(ordinaryFileSnapshot(mismatch.repository.controlDir))
       .toEqual(beforeCrossBinding);
 
-    let beforeCrossLaunch: Record<string, string> = {};
+    const beforeCrossLaunch = ordinaryFileSnapshot(
+      mismatch.repository.controlDir,
+    );
     expect(() => registerWorkerIdentity(
       mismatch.repository,
       mismatch.p1.worktree,
@@ -3308,14 +3728,9 @@ describe("sealed probe observation receipt", () => {
         attempt: 1,
         launchId: "launch-dev-observed-a",
         registrationLaunchId: "launch-dev-supplied-b",
-        beforeRegister: () => {
-          beforeCrossLaunch = ordinaryFileSnapshot(
-            mismatch.repository.controlDir,
-          );
-        },
       },
     )).toThrow(expect.objectContaining({
-      code: "ROLE_IDENTITY_INTENT_MISMATCH",
+      code: "ROLE_IDENTITY_WORKER_AUTHORITY_MISMATCH",
     }));
     expect(ordinaryFileSnapshot(mismatch.repository.controlDir))
       .toEqual(beforeCrossLaunch);
@@ -3330,7 +3745,7 @@ describe("sealed probe observation receipt", () => {
       positive.p1.worktree,
       workerAttempt1,
       {
-        operationId: "bootstrap-dev-positive-1",
+        operationId: "launch-dev-positive-1",
         challenge: "c3".repeat(32),
         threadId: "actual-dev-positive-thread-1",
         hostId: "actual-dev-positive-host-1",
@@ -3384,7 +3799,7 @@ describe("sealed probe observation receipt", () => {
       positive.p1.worktree,
       workerAttempt2,
       {
-        operationId: "bootstrap-dev-positive-2",
+        operationId: "launch-dev-positive-2",
         challenge: "d4".repeat(32),
         threadId: "actual-dev-positive-thread-2",
         hostId: "actual-dev-positive-host-2",
@@ -3410,8 +3825,8 @@ describe("sealed probe observation receipt", () => {
       idempotent: false,
       session: {
         role: "DEV",
-        thread_id: "actual-dev-positive-thread-2",
-        host_id: "actual-dev-positive-host-2",
+        thread_id: platformUuid("actual-dev-positive-thread-2"),
+        host_id: platformUuid("actual-dev-positive-host-2"),
         attempt: 2,
         launch_id: "launch-dev-positive-2",
         worker_bootstrap: {
@@ -3434,7 +3849,7 @@ describe("sealed probe observation receipt", () => {
       positiveLoaded.paths.roleIdentityIntents,
     )
       .filter((name) => (
-        name.endsWith(".role-identity-intent.json")
+        name.endsWith(".role-identity-bundle.json")
       ))
       .map((name) => JSON.parse(readFileSync(
         path.join(
@@ -3442,7 +3857,7 @@ describe("sealed probe observation receipt", () => {
           name,
         ),
         "utf8",
-      )))
+      )).intent)
       .find((candidate) => (
         candidate.operation_id === "register-dev-positive-2"
       ));
@@ -3536,6 +3951,12 @@ describe("sealed probe observation receipt", () => {
       "FOREMAN-A-1",
       `Ghp-${"Ab9_".repeat(9)}`,
       `prefix:XoXb_${"Q7-".repeat(10)}:suffix`,
+      `sk_live_${"S3".repeat(16)}`,
+      `glpat-${"G4".repeat(16)}`,
+      `hf_${"H5".repeat(16)}`,
+      `xai-${"X6".repeat(16)}`,
+      `SK${"A7".repeat(16)}`,
+      `SG.${"S8".repeat(12)}.${"G9".repeat(12)}`,
       "A".repeat(43),
     ];
     for (const [index, rejected] of rejectedValues.entries()) {
@@ -3548,6 +3969,7 @@ describe("sealed probe observation receipt", () => {
         hostId: "actual-platform-host-1",
         sessionId: `actual-session-sensitive-${index + 1}`,
         launchId: null,
+        rawIdentityIds: true,
       });
       const receiptFile = path.join(
         artifacts,
@@ -3567,6 +3989,7 @@ describe("sealed probe observation receipt", () => {
       expect(rejectedError).toBeTruthy();
       expect([
         "CANARY_OBSERVATION_SENSITIVE_DATA",
+        "ROLE_IDENTITY_OPAQUE_ID_INVALID",
         "ROLE_IDENTITY_SYNTHETIC_ALIAS_FORBIDDEN",
       ]).toContain(rejectedError.code);
       expect(String(rejectedError.message)).not.toContain(rejected);
@@ -3582,6 +4005,7 @@ describe("sealed probe observation receipt", () => {
       hostId: "LoCaL",
       sessionId: "actual-session-local-host",
       launchId: null,
+      rawIdentityIds: true,
     });
     const localHostFile = path.join(artifacts, "local-host.json");
     writePrivateJson(localHostFile, localHost);
@@ -3592,7 +4016,7 @@ describe("sealed probe observation receipt", () => {
       challengeArgs(localHostOperation, localHostFile),
       repository.root,
     )).toThrow(expect.objectContaining({
-      code: "ROLE_IDENTITY_SYNTHETIC_ALIAS_FORBIDDEN",
+      code: "ROLE_IDENTITY_OPAQUE_ID_INVALID",
     }));
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeLocalHost);
@@ -3658,7 +4082,7 @@ describe("sealed probe observation receipt", () => {
         challengeArgs(operationId, candidateFile),
         repository.root,
       )).toThrow(expect.objectContaining({
-        code: "ROLE_IDENTITY_OBSERVATION_INVALID",
+        code: "ROLE_IDENTITY_INPUT_AUTHORITY_INVALID",
       }));
       expect(ordinaryFileSnapshot(repository.controlDir)).toEqual(before);
       trustCase.cleanup?.();
@@ -3671,6 +4095,108 @@ describe("sealed probe observation receipt", () => {
     ], repository.root)).toThrow(expect.objectContaining({
       code: "INVALID_ARGUMENT",
     }));
+
+    const loaded = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (value) => value,
+    );
+    const hostileInventoryName =
+      `sk_live_${"N7".repeat(16)}.role-identity-bundle.json`;
+    const hostileInventoryFile = path.join(
+      loaded.paths.roleIdentityIntents,
+      hostileInventoryName,
+    );
+    mkdirSync(loaded.paths.roleIdentityIntents, { recursive: true });
+    chmodSync(loaded.paths.roleIdentityIntents, 0o700);
+    writePrivateJson(hostileInventoryFile, { attacker: true });
+    const beforeInventoryRead = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    const inventoryRead = runGoalctlProcess(repository.root, [
+      "status",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ]);
+    expect(inventoryRead.status).toBe(2);
+    expect(inventoryRead.stdout).toBe("");
+    expect(inventoryRead.stderr).toMatch(
+      /^goalctl\[ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID\]:/,
+    );
+    expect(inventoryRead.stderr).not.toContain(hostileInventoryName);
+    expect(inventoryRead.stderr).not.toContain("sk_live_");
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeInventoryRead);
+    unlinkSync(hostileInventoryFile);
+
+    const legacyPendingFile = path.join(
+      loaded.paths.roleIdentityIntents,
+      `${"a".repeat(64)}.json`,
+    );
+    writePrivateJson(legacyPendingFile, { legacy: true });
+    const beforeLegacyRead = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(() => goalCommand([
+      "status",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ], repository.root)).toThrow(expect.objectContaining({
+      code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+    }));
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeLegacyRead);
+    unlinkSync(legacyPendingFile);
+  });
+
+  test("rejects an lstat-to-open receipt rename swap without echo or controller writes", () => {
+    const artifactRoot = realpathSync(mkdtempSync(
+      path.join(tmpdir(), "goal-role-identity-race-"),
+    ));
+    roots.push(artifactRoot);
+    chmodSync(artifactRoot, 0o700);
+    const receiptFile = path.join(artifactRoot, "receipt.json");
+    const replacementFile = path.join(
+      artifactRoot,
+      "replacement.json",
+    );
+    const displacedFile = path.join(
+      artifactRoot,
+      "displaced.json",
+    );
+    const secret = `sk_live_${"R8".repeat(16)}`;
+    writePrivateJson(receiptFile, { identity: "original" });
+    writePrivateJson(replacementFile, { identity: secret });
+    const fsRuntime = nodeRequire("fs") as Record<string, any>;
+    const originalOpenSync = fsRuntime.openSync.bind(fsRuntime);
+    let swapped = false;
+    const openSpy = jest.spyOn(fsRuntime, "openSync")
+      .mockImplementation((...args: any[]) => {
+        if (!swapped && args[0] === receiptFile) {
+          swapped = true;
+          renameSync(receiptFile, displacedFile);
+          renameSync(replacementFile, receiptFile);
+        }
+        return originalOpenSync(...args);
+      });
+    let raceError: any = null;
+    try {
+      observation.readStableFile(receiptFile, {
+        label: "role identity observation receipt",
+        parentMode: 0o700,
+        mode: 0o600,
+        maxBytes: 64 * 1024,
+      });
+    } catch (error) {
+      raceError = error;
+    } finally {
+      openSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(raceError).toEqual(expect.objectContaining({
+      code: "CANARY_OBSERVATION_FILE_RACE",
+    }));
+    expect(String(raceError.message)).not.toContain(secret);
   });
 
   test("gates registration and exact-retries response loss mechanically", () => {
@@ -3692,13 +4218,15 @@ describe("sealed probe observation receipt", () => {
         "utf8",
       ).trim();
       const eventId = receipt.options.registrationEventId;
+      const foremanThread = platformUuid("foreman-thread-1");
+      const foremanHost = platformUuid("host-1");
       const common = [
         "register-role",
         "--goal", "goal-receipt-integration",
         "--task", "TASK-A",
         "--role", "FOREMAN",
-        "--thread", "foreman-thread-1",
-        "--host", "host-1",
+        "--thread", foremanThread,
+        "--host", foremanHost,
         "--attempt", "1",
         "--event-id", eventId,
         "--bootstrap-capability-file",
@@ -3729,9 +4257,9 @@ describe("sealed probe observation receipt", () => {
         idempotent: false,
         session: {
           role_identity: {
-            protocol: "goalctl-role-identity-intent-v1",
-            thread_id: "foreman-thread-1",
-            host_id: "host-1",
+            protocol: "goalctl-role-identity-intent-v2",
+            thread_id: foremanThread,
+            host_id: foremanHost,
             attempt: 1,
             session_id: receipt.identityObservation.session_id,
             launch_id: null,
@@ -3756,7 +4284,7 @@ describe("sealed probe observation receipt", () => {
         "--goal", "goal-receipt-integration",
         "--task", "TASK-A",
         "--role", "FOREMAN",
-        "--thread", "foreman-thread-1",
+        "--thread", foremanThread,
         "--json",
       ], repository.root).value).toMatchObject({
         goal_id: "goal-receipt-integration",
@@ -3888,8 +4416,8 @@ describe("sealed probe observation receipt", () => {
         operationId: refreshEventId,
         taskId: "TASK-A",
         role: "FOREMAN",
-        threadId: "foreman-thread-1",
-        hostId: "host-1",
+        threadId: foremanThread,
+        hostId: foremanHost,
         sessionId: receipt.identityObservation.session_id,
         launchId: null,
       });
@@ -3931,8 +4459,8 @@ describe("sealed probe observation receipt", () => {
         "--goal", "goal-receipt-integration",
         "--task", "TASK-A",
         "--role", "FOREMAN",
-        "--thread", "foreman-thread-1",
-        "--host", "host-1",
+        "--thread", foremanThread,
+        "--host", foremanHost,
         "--attempt", "1",
         "--expected-state-revision",
         String(loaded.snapshot.tasks["TASK-A"].state_revision),
@@ -4073,6 +4601,35 @@ describe("sealed probe observation receipt", () => {
         "goal-receipt-integration",
         (value) => value.snapshot.tasks["TASK-A"].state_revision,
       )).toBe(beforeRecoveryRevision);
+
+      const acceptedBundleFile = readdirSync(
+        loaded.paths.roleIdentityIntents,
+      ).filter((name) => (
+        name.endsWith(".role-identity-bundle.json")
+      )).map((name) => path.join(
+        loaded.paths.roleIdentityIntents,
+        name,
+      )).find((file) => (
+        JSON.parse(readFileSync(file, "utf8")).operation_id === eventId
+      ));
+      expect(acceptedBundleFile).toBeTruthy();
+      const acceptedBundleBytes = readFileSync(
+        String(acceptedBundleFile),
+      );
+      unlinkSync(String(acceptedBundleFile));
+      writeFileSync(
+        String(acceptedBundleFile),
+        acceptedBundleBytes,
+        { mode: 0o600 },
+      );
+      chmodSync(String(acceptedBundleFile), 0o600);
+      expect(() => goalCommand([
+        "status",
+        "--goal", "goal-receipt-integration",
+        "--json",
+      ], repository.root)).toThrow(expect.objectContaining({
+        code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+      }));
     } finally {
       if (previous.controlDir === undefined) {
         delete process.env.GOAL_CONTROL_DIR;
@@ -4086,4 +4643,73 @@ describe("sealed probe observation receipt", () => {
       }
     }
   });
+
+  test.each(["delete", "tamper"] as const)(
+    "fails append-only replay when a consumed identity bundle is %s",
+    (mutation) => {
+      const current = fixture({
+        role: "FOREMAN",
+        eventTag: `authority-${mutation}`,
+      });
+      process.env.GOAL_CONTROL_DIR = current.repository.controlDir;
+      process.env.GOAL_CONTROL_TEST_MODE = "1";
+      goalCommand([
+        "register-role",
+        "--goal", current.options.goalId,
+        "--task", current.options.taskId,
+        "--role", "FOREMAN",
+        "--thread", current.options.threadId,
+        "--host", current.options.hostId,
+        "--attempt", "1",
+        "--event-id", current.options.registrationEventId,
+        "--bootstrap-capability-file",
+        String(current.initialized.bootstrap_capability_file),
+        "--probe-observation-receipt", current.receiptFile,
+        "--probe-observation-receipt-sha256",
+        current.options.probeObservationReceiptSha256,
+        "--probe-observation-plan", current.planFile,
+        "--probe-observation-plan-sha256",
+        current.options.probeObservationPlanSha256,
+        "--probe-observation-stable-id",
+        current.options.probeObservationStableId,
+        "--probe-observation-challenge",
+        current.options.probeObservationChallenge,
+        "--json",
+      ], current.repository.root);
+      const loaded = loadGoalStateReadOnly(
+        current.repository.root,
+        current.options.goalId,
+        (value) => value,
+      );
+      const bundleFile = readdirSync(
+        loaded.paths.roleIdentityIntents,
+      ).filter((name) => (
+        name.endsWith(".role-identity-bundle.json")
+      )).map((name) => path.join(
+        loaded.paths.roleIdentityIntents,
+        name,
+      )).find((file) => (
+        JSON.parse(readFileSync(file, "utf8")).operation_id
+          === current.options.registrationEventId
+      ));
+      expect(bundleFile).toBeTruthy();
+      if (mutation === "delete") {
+        unlinkSync(String(bundleFile));
+      } else {
+        const bundle = JSON.parse(readFileSync(
+          String(bundleFile),
+          "utf8",
+        ));
+        bundle.intent.thread_id = "tampered-authority-thread";
+        writePrivateJson(String(bundleFile), bundle);
+      }
+      expect(() => goalCommand([
+        "status",
+        "--goal", current.options.goalId,
+        "--json",
+      ], current.repository.root)).toThrow(expect.objectContaining({
+        code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+      }));
+    },
+  );
 });

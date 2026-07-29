@@ -68,11 +68,13 @@ const NON_TRANSITION_EVENTS = new Set([
   'PROBE_OBSERVATION_REFRESHED',
 ]);
 
-function initialTaskState(task, manifest) {
+function initialTaskState(task, manifest, options = {}) {
   return {
     task_id: task.id,
     probe_observation_required:
       Boolean(manifest.probe_observation_receipts),
+    role_identity_protocol_version:
+      options.roleIdentityProtocolVersion || 1,
     phase: 'QUEUED',
     state_revision: 0,
     control_epoch: 0,
@@ -169,7 +171,12 @@ function applyRegistration(state, event) {
   const role = event.payload.role || event.actor.role;
   assertControl(ROLES.includes(role), 'INVALID_ROLE', `未知角色 ${role}`);
   assertControl(typeof event.payload.thread_id === 'string' && event.payload.thread_id.length > 0, 'INVALID_REGISTRATION', 'thread_id 缺失');
-  const hostId = event.payload.host_id || 'local';
+  const hostId = event.payload.host_id;
+  assertControl(
+    typeof hostId === 'string' && hostId.length > 0,
+    'INVALID_REGISTRATION',
+    'host_id 缺失',
+  );
   assertControl(event.actor.role === role, 'REGISTRATION_ACTOR_MISMATCH', 'REGISTER_ROLE actor 必须是目标 role');
   assertControl(event.actor.thread_id === event.payload.thread_id && event.actor.host_id === hostId, 'REGISTRATION_ACTOR_MISMATCH', 'REGISTER_ROLE actor identity 与目标不一致');
   assertControl(typeof event.payload.capability_sha256 === 'string' && /^[0-9a-f]{64}$/.test(event.payload.capability_sha256), 'INVALID_REGISTRATION', 'capability hash 缺失');
@@ -177,17 +184,64 @@ function applyRegistration(state, event) {
   assertControl(event.payload.authorized_by && typeof event.payload.authorized_by === 'object', 'REGISTRATION_AUTHORITY_REQUIRED', 'REGISTER_ROLE 缺授权者');
   if (state.probe_observation_required) {
     const identity = event.payload.role_identity;
+    const protocolRequired =
+      state.role_identity_protocol_version >= 2;
     assertControl(
-      identity
-        && identity.protocol === 'goalctl-role-identity-intent-v1'
+      (!protocolRequired && identity === undefined)
+        || (
+          identity
+          && (
+            protocolRequired
+              ? identity.protocol
+                === 'goalctl-role-identity-intent-v2'
+              : [
+                'goalctl-role-identity-intent-v1',
+                'goalctl-role-identity-intent-v2',
+              ].includes(identity.protocol)
+          )
         && identity.operation_id === event.event_id
         && identity.thread_id === event.payload.thread_id
         && identity.host_id === hostId
         && identity.attempt === Number(event.payload.attempt || 1)
-        && identity.launch_id === (event.payload.launch_id || null),
+        && identity.launch_id === (event.payload.launch_id || null)
+        ),
       'ROLE_IDENTITY_INTENT_MISMATCH',
       'probe-enabled REGISTER_ROLE 必须绑定 exact upstream role identity intent',
     );
+    if (
+      identity
+        && identity.protocol === 'goalctl-role-identity-intent-v2'
+    ) {
+      assertControl(
+        hashObject(event.payload.authorized_by)
+            === identity.registration_authorized_by_sha256
+          && event.payload.probe_observation
+          && event.payload.probe_observation.binding_sha256
+            === identity.probe_observation_binding_sha256
+          && (
+            ['DEV', 'REVIEW', 'RECEIPT'].includes(role)
+              ? (
+                event.payload.worker_bootstrap
+                  && event.payload.worker_bootstrap.binding_sha256
+                    === identity.worker_bootstrap_binding_sha256
+                  && event.payload.worker_bootstrap.thread
+                    === identity.thread_id
+                  && event.payload.worker_bootstrap.host
+                    === identity.host_id
+                  && event.payload.worker_bootstrap.operation_id
+                    === identity.launch_id
+                  && event.payload.worker_bootstrap.head
+                    === identity.full_head
+              )
+              : (
+                event.payload.worker_bootstrap === undefined
+                  && identity.worker_bootstrap_binding_sha256 === null
+              )
+          ),
+        'ROLE_IDENTITY_INTENT_MISMATCH',
+        'REGISTER_ROLE issuer/probe/bootstrap sibling 与 v2 identity authority 不一致',
+      );
+    }
   }
   if (['DEV', 'REVIEW', 'RECEIPT'].includes(role)) {
     assertControl(typeof event.payload.launch_id === 'string' && event.payload.launch_id.length > 0, 'LAUNCH_ID_REQUIRED', `${role} registration 缺 launch_id`);
@@ -308,6 +362,15 @@ function applyRegistration(state, event) {
         probe_observation: JSON.parse(
           JSON.stringify(event.payload.probe_observation),
         ),
+        ...(event.payload.role_identity
+          && event.payload.role_identity.protocol
+            === 'goalctl-role-identity-intent-v2'
+          ? {
+            registration_probe_observation: JSON.parse(
+              JSON.stringify(event.payload.probe_observation),
+            ),
+          }
+          : {}),
       }
       : {}),
     ...(event.payload.role_identity !== undefined
@@ -793,14 +856,27 @@ function applyExpiredForemanRecovery(state, event) {
   assertControl(attempt === incumbentAttempt + 1, 'STALE_ROLE_ATTEMPT', `FOREMAN attempt 必须恰好从 ${incumbentAttempt} 增至 ${incumbentAttempt + 1}`);
   if (state.probe_observation_required) {
     const identity = event.payload.role_identity;
+    const protocolRequired =
+      state.role_identity_protocol_version >= 2;
     assertControl(
-      identity
-        && identity.protocol === 'goalctl-role-identity-intent-v1'
+      (!protocolRequired && identity === undefined)
+        || (
+          identity
+          && (
+            protocolRequired
+              ? identity.protocol
+                === 'goalctl-role-identity-intent-v2'
+              : [
+                'goalctl-role-identity-intent-v1',
+                'goalctl-role-identity-intent-v2',
+              ].includes(identity.protocol)
+          )
         && identity.operation_id === event.payload.root_recovery_id
         && identity.thread_id === event.actor.thread_id
         && identity.host_id === event.actor.host_id
         && identity.attempt === attempt
-        && identity.launch_id === null,
+        && identity.launch_id === null
+        ),
       'ROLE_IDENTITY_INTENT_MISMATCH',
       'probe-enabled FOREMAN recovery 必须绑定 exact upstream role identity intent',
     );

@@ -105,6 +105,7 @@ describe("goal-control generation boundary hook surface", () => {
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
+      "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/preclaim-issues.js:call:preclaimGenerationBoundaryFaultHook",
       "scripts/goal-control/preflight.js:call:preflightGenerationBoundaryFaultHook",
       "scripts/goal-control/resources.js:call:resourceGenerationBoundaryFaultHook",
