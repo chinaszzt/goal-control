@@ -65,11 +65,14 @@ const NON_TRANSITION_EVENTS = new Set([
   'PACKET_UPDATED',
   'P1_COMMIT_ABANDONED',
   'GITHUB_MERGE_RESERVED',
+  'PROBE_OBSERVATION_REFRESHED',
 ]);
 
 function initialTaskState(task, manifest) {
   return {
     task_id: task.id,
+    probe_observation_required:
+      Boolean(manifest.probe_observation_receipts),
     phase: 'QUEUED',
     state_revision: 0,
     control_epoch: 0,
@@ -286,6 +289,13 @@ function applyRegistration(state, event) {
         ),
       }
       : {}),
+    ...(event.payload.probe_observation !== undefined
+      ? {
+        probe_observation: JSON.parse(
+          JSON.stringify(event.payload.probe_observation),
+        ),
+      }
+      : {}),
     registered_state_revision: state.state_revision + 1,
     registered_control_epoch: event.control_epoch,
     registered_packet_revision: state.packet.revision,
@@ -312,6 +322,38 @@ function applyHeartbeat(state, event) {
   session.status = event.payload.status || 'active';
   session.last_seen_at = event.accepted_at;
   session.lease_until = new Date(Date.parse(event.accepted_at) + leaseMilliseconds).toISOString();
+}
+
+function applyProbeObservationRefreshed(state, event) {
+  const role = event.payload.role;
+  const session = state.sessions[role];
+  assertControl(
+    session
+      && session.thread_id === event.actor.thread_id
+      && session.host_id === event.actor.host_id
+      && session.attempt === event.payload.attempt,
+    'CANARY_OBSERVATION_CROSS_IDENTITY',
+    'probe observation refresh actor/session identity 漂移',
+  );
+  assertControl(
+    session.probe_observation
+      && session.probe_observation.binding_sha256
+        === event.payload.previous_binding_sha256,
+    'CANARY_OBSERVATION_REFRESH_CAS_MISMATCH',
+    'probe observation refresh previous binding CAS 漂移',
+  );
+  assertControl(
+    event.payload.probe_observation.thread_id === session.thread_id
+      && event.payload.probe_observation.host_id === session.host_id
+      && event.payload.probe_observation.attempt === session.attempt
+      && event.payload.probe_observation.accepted_at === event.accepted_at,
+    'CANARY_OBSERVATION_CROSS_IDENTITY',
+    'refreshed probe observation 未绑定 exact session/accepted_at',
+  );
+  session.probe_observation = JSON.parse(
+    JSON.stringify(event.payload.probe_observation),
+  );
+  session.probe_observation_refreshed_at = event.accepted_at;
 }
 
 function applyP1CommitAbandoned(state, event) {
@@ -783,6 +825,13 @@ function applyExpiredForemanRecovery(state, event) {
     recovery_event_id: event.payload.root_recovery_id || event.event_id,
     recovery_request_sha256: event.payload.request_sha256,
     recovery_incident_ref: event.payload.incident_ref,
+    ...(event.payload.probe_observation !== undefined
+      ? {
+        probe_observation: JSON.parse(
+          JSON.stringify(event.payload.probe_observation),
+        ),
+      }
+      : {}),
   };
   if (pendingRecovery && pendingRecovery.role === 'CAPTAIN') {
     state.recovery = pendingRecovery;
@@ -1623,6 +1672,9 @@ function applyEvent(previousState, event, goalControlEpoch) {
     const actorKey = actorSequenceKey(event.actor);
     state.actor_sequences[actorKey] = event.actor_sequence;
     if (event.type === 'HEARTBEAT') applyHeartbeat(state, event);
+    else if (event.type === 'PROBE_OBSERVATION_REFRESHED') {
+      applyProbeObservationRefreshed(state, event);
+    }
     else if (event.type === 'CONTROL_RECONCILED') applyControlReconciled(state, event, goalControlEpoch);
     else if (event.type === 'ADD_HOLD') applyHold(state, event);
     else if (event.type === 'RESOLVE_HOLD') resolveHold(state, event);

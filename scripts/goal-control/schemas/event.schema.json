@@ -63,6 +63,7 @@
         "MERGED",
         "ARCHIVED",
         "REGISTER_ROLE",
+        "PROBE_OBSERVATION_REFRESHED",
         "HEARTBEAT",
         "CONTROL_RECONCILED",
         "ADD_HOLD",
@@ -271,6 +272,8 @@
         "status": { "type": "string", "enum": ["active", "idle", "systemError"] },
         "task_nonce": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{16,128}$" },
         "worker_bootstrap": { "$ref": "#/$defs/workerBootstrap" },
+        "probe_observation": { "$ref": "#/$defs/probeObservationBinding" },
+        "previous_binding_sha256": { "$ref": "#/$defs/sha256" },
         "capability_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "capability_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "authorized_by": { "type": "object" },
@@ -449,7 +452,8 @@
     { "if": { "properties": { "type": { "const": "GITHUB_MERGE_RESERVED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["target_event_id", "request_sha256", "repository", "pull_request_number", "pull_request_url", "base_branch", "expected_main_head", "candidate_head", "task_cycle", "phase", "issue", "head_ref_name", "body_sha256", "preflight_attestation", "pr_contract_sha256"], "propertyNames": { "enum": ["target_event_id", "request_sha256", "repository", "pull_request_number", "pull_request_url", "base_branch", "expected_main_head", "candidate_head", "task_cycle", "phase", "issue", "head_ref_name", "body_sha256", "preflight_attestation", "pr_contract_sha256"] } } } } },
     { "if": { "properties": { "type": { "const": "MERGED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["main_merge_sha", "expected_main_head"], "propertyNames": { "enum": ["main_merge_sha", "expected_main_head", "merge_receipt_sha256", "merge_reservation_event_id", "merge_request_sha256"] } } } } },
     { "if": { "properties": { "type": { "const": "ARCHIVED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["evidence_id"], "propertyNames": { "enum": ["evidence_id"] } } } } },
-    { "if": { "properties": { "type": { "const": "REGISTER_ROLE" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by"], "propertyNames": { "enum": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by", "worker_bootstrap", "goal_foreman_projection", "projected_lease_until"] } } } } },
+    { "if": { "properties": { "type": { "const": "REGISTER_ROLE" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by"], "propertyNames": { "enum": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by", "worker_bootstrap", "probe_observation", "goal_foreman_projection", "projected_lease_until"] } } } } },
+    { "if": { "properties": { "type": { "const": "PROBE_OBSERVATION_REFRESHED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["role", "attempt", "previous_binding_sha256", "probe_observation", "request_sha256"], "propertyNames": { "enum": ["role", "attempt", "previous_binding_sha256", "probe_observation", "request_sha256"] } } } } },
     { "if": { "properties": { "type": { "const": "HEARTBEAT" } }, "required": ["type"] }, "then": { "properties": { "payload": { "propertyNames": { "enum": ["lease_ms", "status"] } } } } },
     { "if": { "properties": { "type": { "const": "CONTROL_RECONCILED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["control_event_id", "instruction_ref"], "propertyNames": { "enum": ["control_event_id", "instruction_ref"] } } } } },
     { "if": { "properties": { "type": { "const": "ADD_HOLD" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["kind", "evidence_id"], "propertyNames": { "enum": ["kind", "hold_id", "reason", "evidence_id"] } } } } },
@@ -460,7 +464,7 @@
     { "if": { "properties": { "type": { "const": "RECOVERY_HANDOFF_BOUND" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["successor_thread_id", "snapshot_id", "snapshot_sha256", "import_receipt_id", "import_receipt_sha256", "predecessor_launch_id", "predecessor_launch_sha256", "source_worktree", "source_branch", "source_launch_head", "source_observed_head", "destination_worktree", "destination_branch", "import_commit"], "propertyNames": { "enum": ["successor_thread_id", "snapshot_id", "snapshot_sha256", "import_receipt_id", "import_receipt_sha256", "predecessor_launch_id", "predecessor_launch_sha256", "source_worktree", "source_branch", "source_launch_head", "source_observed_head", "destination_worktree", "destination_branch", "import_commit"] } } } } },
     { "if": { "properties": { "type": { "const": "RECOVERY_HANDOFF_ABANDONED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["successor_thread_id", "handoff_event_id", "reason", "incident_ref", "foreman_thread_id", "foreman_host_id", "foreman_attempt"], "propertyNames": { "enum": ["successor_thread_id", "handoff_event_id", "reason", "incident_ref", "foreman_thread_id", "foreman_host_id", "foreman_attempt"] } } } } },
     { "if": { "properties": { "type": { "const": "RECOVERY_PROMOTED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["successor_thread_id", "handoff_event_id", "launch_id", "launch_sha256", "preflight_evidence_id"], "propertyNames": { "enum": ["successor_thread_id", "handoff_event_id", "launch_id", "launch_sha256", "preflight_evidence_id"] } } } } },
-    { "if": { "properties": { "type": { "const": "RECOVER_EXPIRED_FOREMAN" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["attempt", "lease_ms", "status", "capability_sha256", "capability_file", "reason", "incident_ref", "request_sha256", "expected_event_head", "expected_foreman_thread_id", "expected_foreman_host_id", "expected_foreman_attempt", "expected_foreman_lease_until", "authorized_by"], "propertyNames": { "enum": ["attempt", "lease_ms", "status", "capability_sha256", "capability_file", "reason", "incident_ref", "request_sha256", "root_recovery_id", "goal_scope", "goal_scope_sha256", "scope_task_ids", "source_task_ids", "adoption_target_task_id", "adopt_without_local_foreman", "source_foreman", "expected_event_head", "expected_foreman_thread_id", "expected_foreman_host_id", "expected_foreman_attempt", "expected_foreman_lease_until", "authorized_by"] } } } } },
+    { "if": { "properties": { "type": { "const": "RECOVER_EXPIRED_FOREMAN" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["attempt", "lease_ms", "status", "capability_sha256", "capability_file", "reason", "incident_ref", "request_sha256", "expected_event_head", "expected_foreman_thread_id", "expected_foreman_host_id", "expected_foreman_attempt", "expected_foreman_lease_until", "authorized_by"], "propertyNames": { "enum": ["attempt", "lease_ms", "status", "capability_sha256", "capability_file", "reason", "incident_ref", "request_sha256", "probe_observation", "root_recovery_id", "goal_scope", "goal_scope_sha256", "scope_task_ids", "source_task_ids", "adoption_target_task_id", "adopt_without_local_foreman", "source_foreman", "expected_event_head", "expected_foreman_thread_id", "expected_foreman_host_id", "expected_foreman_attempt", "expected_foreman_lease_until", "authorized_by"] } } } } },
     { "if": { "properties": { "type": { "const": "PACKET_UPDATED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["revision", "sha256", "path", "change_kind"], "propertyNames": { "enum": ["revision", "sha256", "path", "change_kind"] } } } } }
   ],
   "$defs": {
@@ -668,6 +672,77 @@
         "binding_sha256": {
           "$ref": "#/$defs/sha256"
         }
+      }
+    },
+    "probeObservationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "accepted_at",
+        "attestation_algorithm",
+        "attestation_key_id",
+        "attestation_public_key_sha256",
+        "attestation_public_key_spki_base64",
+        "attestation_signature_base64url",
+        "plan_file",
+        "plan_file_sha256",
+        "receipt_file",
+        "receipt_sha256",
+        "canary_plan_sha256",
+        "stable_id",
+        "challenge",
+        "thread_id",
+        "host_id",
+        "attempt",
+        "target_identity_sha256",
+        "target_fingerprint_sha256",
+        "aggregate_disposition",
+        "observed_at",
+        "expires_at",
+        "probe_results_sha256",
+        "receipt_binding_sha256",
+        "request_sha256",
+        "binding_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "protocol": { "const": "goalctl-sealed-probe-observation-v1" },
+        "accepted_at": { "$ref": "#/$defs/dateTime" },
+        "attestation_algorithm": { "const": "ED25519" },
+        "attestation_key_id": { "$ref": "#/$defs/safeId" },
+        "attestation_public_key_sha256": { "$ref": "#/$defs/sha256" },
+        "attestation_public_key_spki_base64": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "maxLength": 256
+        },
+        "attestation_signature_base64url": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        },
+        "plan_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "plan_file_sha256": { "$ref": "#/$defs/sha256" },
+        "receipt_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "receipt_sha256": { "$ref": "#/$defs/sha256" },
+        "canary_plan_sha256": { "$ref": "#/$defs/sha256" },
+        "stable_id": { "$ref": "#/$defs/safeId" },
+        "challenge": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "thread_id": { "$ref": "#/$defs/safeId" },
+        "host_id": { "$ref": "#/$defs/safeId" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "target_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "target_fingerprint_sha256": { "$ref": "#/$defs/sha256" },
+        "aggregate_disposition": {
+          "enum": ["PASS", "KNOWN_LIMITATION"]
+        },
+        "observed_at": { "$ref": "#/$defs/dateTime" },
+        "expires_at": { "$ref": "#/$defs/dateTime" },
+        "probe_results_sha256": { "$ref": "#/$defs/sha256" },
+        "receipt_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "hardHold": {

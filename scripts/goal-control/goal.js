@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -51,6 +52,7 @@ const {
 const { renderMarkdown, taskLedgerRow } = require('./ledger');
 const {
   acceptedEventFiles,
+  atomicCreate,
   atomicWrite,
   atomicWriteJson,
   canonicalTransactionKey,
@@ -113,6 +115,13 @@ const {
 const {
   validateWorkerBootstrapReceipt,
 } = require('./canary-bootstrap');
+const {
+  assertRequiredLiveBinding: assertRequiredLiveProbeObservationBinding,
+  protocolRequired: probeObservationProtocolRequired,
+  receiptOptions: probeObservationOptions,
+  requestMatchesBinding: probeObservationRequestMatchesBinding,
+  validateReceipt: validateProbeObservationReceipt,
+} = require('./canary-observation-receipt');
 const {
   assertWorkerBootstrapCurrentWorktree,
   assertWorkerBootstrapLaunchBinding,
@@ -677,7 +686,206 @@ function goalPaths(root, goalId) {
     controlHead: path.join(dir, 'control-head.json'),
     foremanRecoveryBatches: path.join(dir, 'foreman-recovery-batches'),
     registrationIntents: path.join(dir, 'registration-intents'),
+    probeObservationChallenges:
+      path.join(dir, 'probe-observation-challenges'),
+    probeObservationEvidence:
+      path.join(dir, 'probe-observation-evidence'),
   };
+}
+
+function probeObservationChallengeFile(paths, eventId) {
+  return path.join(
+    paths.probeObservationChallenges,
+    `${sha256(eventId)}.json`,
+  );
+}
+
+function probeObservationChallengeRecord(paths, options, planSha256) {
+  const file = probeObservationChallengeFile(
+    paths,
+    options.registrationEventId,
+  );
+  assertControl(
+    fs.existsSync(file),
+    'CANARY_OBSERVATION_CHALLENGE_REQUIRED',
+    '必须先由 controller prepare-probe-observation-challenge',
+  );
+  const record = readJson(file, 'probe observation challenge');
+  assertControl(
+    record.canary_plan_sha256 === planSha256,
+    'CANARY_OBSERVATION_CHALLENGE_INVALID',
+    'controller challenge 未绑定当前 canary plan',
+  );
+  return record;
+}
+
+function publicProbeObservationChallenge(record) {
+  return JSON.parse(JSON.stringify(record));
+}
+
+function prepareProbeObservationChallenge(cwd, options) {
+  const root = controlRoot(cwd);
+  return withLock(root, () => {
+    const loaded = loadGoalStateUnlocked(root, options.goalId);
+    assertControl(
+      probeObservationProtocolRequired(loaded.manifest),
+      'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
+      'manifest 未启用 probe observation receipts',
+    );
+    assertControl(
+      loaded.snapshot.tasks[options.taskId],
+      'UNKNOWN_TASK',
+      `未知 task ${options.taskId}`,
+    );
+    const eventId = safeId(
+      options.eventId,
+      'registration event_id',
+    );
+    const role = options.role;
+    assertControl(
+      ['FOREMAN', 'CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT'].includes(role),
+      'INVALID_ROLE',
+      `未知 role ${role}`,
+    );
+    const hostId = options.hostId || 'local';
+    const attempt = Number(options.attempt || 1);
+    assertControl(
+      Number.isSafeInteger(attempt) && attempt > 0,
+      'INVALID_REGISTRATION',
+      'attempt 必须是正整数',
+    );
+    const planSha256 = normalizeHash(
+      options.planSha256,
+      'canary plan sha256',
+    );
+    const issuer = readCapabilityFile(options.issuerCapabilityFile);
+    const now = runtimeNowMilliseconds();
+    const liveSessionIssuer = Object.values(
+      loaded.snapshot.tasks,
+    ).flatMap((task) => Object.values(task.sessions || {}))
+      .some((session) => (
+        session.capability_sha256 === issuer.sha256
+          && session.capability_file === issuer.file
+          && ['active', 'idle'].includes(session.status)
+          && Date.parse(session.lease_until) > now
+      ));
+    const bootstrapIssuer = !loaded.meta.bootstrap_consumed_at
+      && issuer.file === loaded.meta.bootstrap_capability_file
+      && hashesEqual(
+        issuer.sha256,
+        loaded.meta.bootstrap_capability_sha256,
+      );
+    const recoveryIssuer =
+      issuer.file === loaded.meta.foreman_recovery_capability_file
+      && hashesEqual(
+        issuer.sha256,
+        loaded.meta.foreman_recovery_capability_sha256,
+      );
+    assertControl(
+      bootstrapIssuer || recoveryIssuer || liveSessionIssuer,
+      'CAPABILITY_INVALID',
+      'probe observation challenge issuer capability 无权签发',
+    );
+    if (!fs.existsSync(loaded.paths.probeObservationChallenges)) {
+      fs.mkdirSync(loaded.paths.probeObservationChallenges, {
+        mode: 0o700,
+      });
+    }
+    ensurePrivateDirectory(loaded.paths.probeObservationChallenges, {
+      repair: true,
+    });
+    const file = probeObservationChallengeFile(loaded.paths, eventId);
+    const hostAttestation =
+      loaded.manifest.probe_observation_receipts.host_attestation;
+    const request = {
+      schema_version: 1,
+      kind: 'PROBE_OBSERVATION_CHALLENGE',
+      goal_id: options.goalId,
+      task_id: options.taskId,
+      role,
+      thread_id: options.threadId,
+      host_id: hostId,
+      attempt,
+      registration_event_id: eventId,
+      canary_plan_sha256: planSha256,
+      producer_namespace:
+        process.env.GOAL_CONTROL_TEST_MODE === '1'
+            ? 'ISOLATED_TEST_FAKE'
+            : 'HOST_ADAPTER',
+      issuer_capability_sha256: issuer.sha256,
+      attestation_algorithm: hostAttestation.algorithm,
+      attestation_key_id: hostAttestation.key_id,
+      attestation_public_key_sha256:
+        hostAttestation.public_key_sha256,
+    };
+    if (fs.existsSync(file)) {
+      const existing = readJson(file, 'probe observation challenge');
+      const unsigned = { ...existing };
+      delete unsigned.record_sha256;
+      assertControl(
+        existing.record_sha256 === hashObject(unsigned)
+          && Object.entries(request).every(
+            ([key, value]) => existing[key] === value,
+          ),
+        'CANARY_OBSERVATION_REPLAY_CONFLICT',
+        'challenge stable event 已绑定不同 request',
+      );
+      return publicProbeObservationChallenge(existing);
+    }
+    const issuedAt = nowIso();
+    const unsigned = {
+      ...request,
+      challenge: sha256(
+        `${randomId('probe-challenge')}:${eventId}:${issuedAt}`,
+      ),
+      issued_at: issuedAt,
+      expires_at: new Date(
+        Date.parse(issuedAt)
+          + loaded.manifest.probe_observation_receipts.max_ttl_ms,
+      ).toISOString(),
+    };
+    const record = {
+      ...unsigned,
+      record_sha256: hashObject(unsigned),
+    };
+    atomicWriteJson(file, record);
+    return publicProbeObservationChallenge(record);
+  }, {
+    transactionKey: () => {
+      const eventId = safeId(
+        options.eventId,
+        'registration event_id',
+      );
+      const request = {
+        schema_version: 1,
+        kind: 'PROBE_OBSERVATION_CHALLENGE',
+        goal_id: safeId(options.goalId, 'goal_id'),
+        task_id: safeId(options.taskId, 'task_id'),
+        role: options.role,
+        thread_id: safeId(options.threadId, 'thread_id'),
+        host_id: safeId(options.hostId || 'local', 'host_id'),
+        attempt: Number(options.attempt || 1),
+        registration_event_id: eventId,
+        canary_plan_sha256: normalizeHash(
+          options.planSha256,
+          'canary plan sha256',
+        ),
+        producer_namespace:
+          process.env.GOAL_CONTROL_TEST_MODE === '1'
+            ? 'ISOLATED_TEST_FAKE'
+            : 'HOST_ADAPTER',
+        issuer_capability_file: path.resolve(
+          options.issuerCapabilityFile,
+        ),
+      };
+      return canonicalTransactionKey(
+        'PROBE_OBSERVATION_CHALLENGE',
+        { goal_id: request.goal_id },
+        eventId,
+        hashObject(request),
+      );
+    },
+  });
 }
 
 function goalInitTransactionKey(
@@ -801,6 +1009,57 @@ function registrationWorkerBootstrapBinding(loaded, state, options) {
   return sealWorkerBootstrapBinding(receipt);
 }
 
+function registrationProbeObservationBinding(
+  loaded,
+  state,
+  options,
+  eventId = registrationStableEventId(options),
+) {
+  const request = probeObservationOptions(options);
+  const required = probeObservationProtocolRequired(loaded.manifest);
+  assertControl(
+    !required || request !== null,
+    'CANARY_OBSERVATION_REQUIRED',
+    'manifest 启用 probe observation receipts 后，registration 必须携带 sealed PASS receipt',
+  );
+  assertControl(
+    required || request === null,
+    'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
+    '当前 manifest 不接受 probe observation registration binding',
+  );
+  if (request === null) return null;
+  const challengeRecord = probeObservationChallengeRecord(
+    loaded.paths,
+    {
+      ...options,
+      registrationEventId: eventId,
+    },
+    request.canary_plan_sha256,
+  );
+  return validateProbeObservationReceipt({
+    ...options,
+    registrationEventId: eventId,
+    goalId: loaded.manifest.goal_id,
+    taskId: options.taskId,
+    role: options.role,
+    threadId: options.threadId,
+    hostId: options.hostId || 'local',
+    attempt: Number(options.attempt || 1),
+    repositoryHead: git(
+      options.invocationCwd || options.repositoryWorktree,
+      ['rev-parse', 'HEAD'],
+    ),
+    validatedManifestSha256: loaded.manifest.manifest_sha256,
+    manifest: loaded.manifest,
+    challengeRecord,
+    acceptanceTime: options.acceptanceTime,
+    evidenceDirectory: path.join(
+      loaded.paths.probeObservationEvidence,
+      sha256(eventId),
+    ),
+  });
+}
+
 function registrationTransactionKey(options) {
   const goalId = safeId(options.goalId, 'goal_id');
   const taskId = safeId(options.taskId, 'task_id');
@@ -821,6 +1080,9 @@ function registrationTransactionKey(options) {
     authorizer_thread_id: options.authorizerThreadId || null,
     ...(workerBootstrapOptions(options)
       ? { worker_bootstrap: workerBootstrapOptions(options) }
+      : {}),
+    ...(probeObservationOptions(options)
+      ? { probe_observation: probeObservationOptions(options) }
       : {}),
   };
   return canonicalTransactionKey(
@@ -872,6 +1134,9 @@ function foremanRecoveryTransactionKey(options) {
     incident_ref: typeof options.incidentRef === 'string'
       ? options.incidentRef.trim()
       : '',
+    ...(probeObservationOptions(options)
+      ? { probe_observation: probeObservationOptions(options) }
+      : {}),
   };
   return canonicalTransactionKey(
     'FOREMAN_RECOVERY',
@@ -2860,6 +3125,10 @@ function authorizeRegistrationRetry(root, loaded, state, options, accepted) {
       && workerBootstrapRequestMatchesBinding(
         accepted.payload.worker_bootstrap || null,
         options,
+      )
+      && probeObservationRequestMatchesBinding(
+        accepted.payload.probe_observation || null,
+        options,
       ),
     'EVENT_ID_CONFLICT',
     `registration event id ${accepted && accepted.event_id} 已被不同请求使用`,
@@ -3119,6 +3388,7 @@ function buildForemanRecoveryEvent(options) {
     incidentRef,
     leaseMilliseconds,
     originalScope,
+    probeObservation,
     reason,
     requestSha256,
     rootRecoveryId,
@@ -3152,6 +3422,9 @@ function buildForemanRecoveryEvent(options) {
       reason,
       incident_ref: incidentRef,
       request_sha256: requestSha256,
+      ...(probeObservation
+        ? { probe_observation: probeObservation }
+        : {}),
       root_recovery_id: rootRecoveryId,
       goal_scope: originalScope,
       goal_scope_sha256: originalScope.scope_sha256,
@@ -3498,6 +3771,10 @@ function registrationIntentMatchesOptions(intent, eventId, options) {
     && workerBootstrapRequestMatchesBinding(
       request.worker_bootstrap || null,
       options,
+    )
+    && probeObservationRequestMatchesBinding(
+      request.probe_observation || null,
+      options,
     );
 }
 
@@ -3683,7 +3960,18 @@ function recoveryIntentMatchesOptions(intent, rootRecoveryId, options) {
       'expected Goal FOREMAN recovery scope sha256',
     )
     && request.reason === reason
-    && request.incident_ref === incidentRef;
+    && request.incident_ref === incidentRef
+    && probeObservationRequestMatchesBinding(
+      request.probe_observation || null,
+      {
+        ...options,
+        role: 'FOREMAN',
+        taskId: options.taskId,
+        threadId: options.threadId,
+        hostId,
+        attempt: Number(options.attempt),
+      },
+    );
 }
 
 function recoverPreparedRecoveryBatch(paths, rootRecoveryId, options) {
@@ -5319,6 +5607,43 @@ function validateRoleLaunchBoundary(
   validateRoleHoldBoundary(state, event);
   const session = state.sessions[role];
   assertControl(session && ['active', 'idle'].includes(session.status), 'FRESH_SESSION_REQUIRED', `${event.type} 需要 active ${role} session`);
+  const acceptedAt = Date.parse(event.accepted_at);
+  const receiptHead = event.type === 'DEV_READY'
+    ? event.full_head
+    : state.full_head;
+  assertRequiredLiveProbeObservationBinding(
+    loaded.manifest,
+    session,
+    `${event.type} durable boundary`,
+    acceptedAt,
+    {
+      repositoryHead: receiptHead,
+      role,
+      taskId: state.task_id,
+    },
+  );
+  if (event.type.startsWith('LAUNCH_')) {
+    const captain = state.sessions.CAPTAIN;
+    assertControl(
+      captain
+        && event.actor.role === 'CAPTAIN'
+        && event.actor.thread_id === captain.thread_id
+        && event.actor.host_id === captain.host_id,
+      'CAPTAIN_ACTOR_REQUIRED',
+      `${event.type} 必须由 current CAPTAIN actor 启动`,
+    );
+    assertRequiredLiveProbeObservationBinding(
+      loaded.manifest,
+      captain,
+      `${event.type} CAPTAIN actor durable boundary`,
+      acceptedAt,
+      {
+        repositoryHead: receiptHead,
+        role: 'CAPTAIN',
+        taskId: state.task_id,
+      },
+    );
+  }
   const launchId = event.payload.launch_id || session.launch_id;
   assertControl(launchId && launchId === session.launch_id, 'LAUNCH_ID_MISMATCH', `${event.type} launch_id 与 ${role} session 不一致`);
   const resolvedPreflight = event.type === 'DEV_READY'
@@ -7195,6 +7520,60 @@ function taskActionProjection(paths, state, goalId, manifestTask, options = {}) 
       pending_operations,
     };
   }
+  const launchTargetRoles = new Map([
+    ['LAUNCH_DEV', 'DEV'],
+    ['LAUNCH_REVIEW', 'REVIEW'],
+    ['LAUNCH_RECEIPT', 'RECEIPT'],
+  ]);
+  const projectedLaunches = actions.filter(
+    (action) => launchTargetRoles.has(action.type),
+  );
+  if (projectedLaunches.length > 0) {
+    try {
+      const observedNow = runtimeNowMilliseconds();
+      assertRequiredLiveProbeObservationBinding(
+        options.manifest,
+        state.sessions.CAPTAIN,
+        'CAPTAIN public launch action projection',
+        observedNow,
+        {
+          repositoryHead: state.full_head,
+          role: 'CAPTAIN',
+          taskId: state.task_id,
+        },
+      );
+      for (const action of projectedLaunches) {
+        const targetRole = launchTargetRoles.get(action.type);
+        assertRequiredLiveProbeObservationBinding(
+          options.manifest,
+          state.sessions[targetRole],
+          `${targetRole} public launch action projection`,
+          observedNow,
+          {
+            repositoryHead: state.full_head,
+            role: targetRole,
+            taskId: state.task_id,
+          },
+        );
+      }
+    } catch (error) {
+      const blockedLaunchTypes = new Set(
+        projectedLaunches.map((action) => action.type),
+      );
+      return {
+        launch_scope: 'PREFLIGHT_ONLY',
+        launch_error_code:
+          error.code || 'CANARY_OBSERVATION_INVALID',
+        actions: actions.filter(
+          (action) => !blockedLaunchTypes.has(action.type),
+        ),
+        maintenance_actions: maintenance_actions.filter(
+          (action) => action.type !== 'REQUEST_CANDIDATE_PREFLIGHT',
+        ),
+        pending_operations,
+      };
+    }
+  }
   const expectedRole = expectedRoleForPhase(state.phase);
   if (!['DEV', 'REVIEW', 'RECEIPT'].includes(expectedRole)) {
     return {
@@ -7227,8 +7606,42 @@ function taskActionProjection(paths, state, goalId, manifestTask, options = {}) 
   if (operationalScope !== 'FULL') {
     return {
       launch_scope: operationalScope,
-      actions,
+      actions: withoutWorkerVerdict(),
       maintenance_actions,
+      pending_operations,
+    };
+  }
+  try {
+    const observedNow = runtimeNowMilliseconds();
+    assertRequiredLiveProbeObservationBinding(
+      options.manifest,
+      session,
+      `${expectedRole} action projection`,
+      observedNow,
+      {
+        role: expectedRole,
+        taskId: state.task_id,
+      },
+    );
+    const captain = state.sessions.CAPTAIN;
+    assertRequiredLiveProbeObservationBinding(
+      options.manifest,
+      captain,
+      'CAPTAIN action projection',
+      observedNow,
+      {
+        role: 'CAPTAIN',
+        taskId: state.task_id,
+      },
+    );
+  } catch (error) {
+    return {
+      launch_scope: 'PREFLIGHT_ONLY',
+      launch_error_code: error.code || 'CANARY_OBSERVATION_INVALID',
+      actions: withoutWorkerVerdict(),
+      maintenance_actions: maintenance_actions.filter(
+        (action) => action.type !== 'REQUEST_CANDIDATE_PREFLIGHT',
+      ),
       pending_operations,
     };
   }
@@ -7285,6 +7698,29 @@ function taskActionProjection(paths, state, goalId, manifestTask, options = {}) 
       );
       assertControl(launch.repository.branch === git(launchWorktree, ['branch', '--show-current']), 'BRANCH_MISMATCH', 'launch branch 与 worktree 不一致');
       const actualLaunchHead = git(launchWorktree, ['rev-parse', 'HEAD']);
+      const projectionObservedAt = runtimeNowMilliseconds();
+      assertRequiredLiveProbeObservationBinding(
+        options.manifest,
+        session,
+        `${expectedRole} live launch projection`,
+        projectionObservedAt,
+        {
+          repositoryHead: actualLaunchHead,
+          role: expectedRole,
+          taskId: state.task_id,
+        },
+      );
+      assertRequiredLiveProbeObservationBinding(
+        options.manifest,
+        state.sessions.CAPTAIN,
+        'CAPTAIN live launch projection',
+        projectionObservedAt,
+        {
+          repositoryHead: actualLaunchHead,
+          role: 'CAPTAIN',
+          taskId: state.task_id,
+        },
+      );
       if (expectedRole === 'DEV') {
         const exactRuntimeHead = assertDevLaunchHead(
           launchWorktree,
@@ -10297,6 +10733,10 @@ function authorizeForemanRecoveryPristineOddRecovery(root, options) {
 }
 
 function recoverExpiredForeman(cwd, options) {
+  options.repositoryWorktree = fs.realpathSync(repoRoot(cwd));
+  options.invocationCwd = fs.realpathSync(
+    options.invocationCwd || cwd,
+  );
   const root = controlRoot(cwd);
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
@@ -10396,9 +10836,16 @@ function recoverExpiredForeman(cwd, options) {
     let requestSha256;
     let capability;
     let acceptedAt;
+    let probeObservation;
     let intentRecord = batch.intent;
 
-    const buildRequest = (scope, targets, sources, adoptionTarget) => ({
+    const buildRequest = (
+      scope,
+      targets,
+      sources,
+      adoptionTarget,
+      observation,
+    ) => ({
       schema_version: 2,
       root_recovery_id: rootRecoveryId,
       goal_id: options.goalId,
@@ -10416,6 +10863,7 @@ function recoverExpiredForeman(cwd, options) {
       adoption_target_task_id: adoptionTarget,
       reason,
       incident_ref: incidentRef,
+      ...(observation ? { probe_observation: observation } : {}),
     });
 
     const assertLegacyAnchorCas = (binding) => {
@@ -10486,7 +10934,9 @@ function recoverExpiredForeman(cwd, options) {
         targetTaskIds,
         sourceTaskIds,
         adoptionTargetTaskId,
+        intentRecord.request.probe_observation || null,
       );
+      probeObservation = intentRecord.request.probe_observation || null;
       requestSha256 = hashObject(request);
       assertControl(
         expectedGoalScopeSha256 === originalScope.scope_sha256,
@@ -10614,21 +11064,13 @@ function recoverExpiredForeman(cwd, options) {
         targetTaskIds,
         sourceTaskIds,
         adoptionTargetTaskId,
+        null,
       );
-      requestSha256 = hashObject(request);
-      if (preparedProbe) {
-        cleanupExactUnsealedPreparedIntent(
-          loaded.paths.foremanRecoveryBatches,
-          'foreman-recovery',
-          rootRecoveryId,
-          requestSha256,
-          new RegExp(`^foreman-${attempt}-[0-9a-f]{24}\\.cap$`),
-          `FOREMAN recovery ${rootRecoveryId}`,
-        );
-      }
       const { assertNoPendingTaskOperations } = require('./pending-operations');
       for (const taskId of targetTaskIds) {
-        assertNoPendingTaskOperations(root, options.goalId, taskId);
+        assertNoPendingTaskOperations(root, options.goalId, taskId, {
+          excludeGoalOperations: preparedProbe,
+        });
       }
       const {
         listPendingGoalRegistrationIntents,
@@ -10686,6 +11128,38 @@ function recoverExpiredForeman(cwd, options) {
         'FOREMAN',
         options.threadId,
       );
+      probeObservation = registrationProbeObservationBinding(
+        loaded,
+        anchorState,
+        {
+          ...options,
+          role: 'FOREMAN',
+          taskId: options.taskId,
+          threadId: options.threadId,
+          hostId,
+          attempt,
+          acceptanceTime: acceptedAt,
+        },
+        rootRecoveryId,
+      );
+      request = buildRequest(
+        originalScope,
+        targetTaskIds,
+        sourceTaskIds,
+        adoptionTargetTaskId,
+        probeObservation,
+      );
+      requestSha256 = hashObject(request);
+      if (preparedProbe) {
+        cleanupExactUnsealedPreparedIntent(
+          loaded.paths.foremanRecoveryBatches,
+          'foreman-recovery',
+          rootRecoveryId,
+          requestSha256,
+          new RegExp(`^foreman-${attempt}-[0-9a-f]{24}\\.cap$`),
+          `FOREMAN recovery ${rootRecoveryId}`,
+        );
+      }
       const previewCapability = {
         file: path.join(
           recoveryBatchPaths(loaded.paths, rootRecoveryId).dir,
@@ -10728,6 +11202,7 @@ function recoverExpiredForeman(cwd, options) {
           incidentRef,
           leaseMilliseconds,
           originalScope,
+          probeObservation,
           reason,
           requestSha256,
           rootRecoveryId,
@@ -10903,6 +11378,7 @@ function recoverExpiredForeman(cwd, options) {
           incidentRef,
           leaseMilliseconds,
           originalScope,
+          probeObservation,
           reason,
           requestSha256,
           rootRecoveryId,
@@ -11441,6 +11917,15 @@ function exactUnsealedRegistrationPreparedRequest(
     state,
     options,
   );
+  const probeObservation = registrationProbeObservationBinding(
+    loaded,
+    state,
+    {
+      ...options,
+      acceptanceTime: authorizationAt || nowIso(),
+    },
+    eventId,
+  );
   const request = {
     schema_version: 1,
     event_id: eventId,
@@ -11455,6 +11940,9 @@ function exactUnsealedRegistrationPreparedRequest(
     launch_id: workerLaunchId,
     ...(workerBootstrap
       ? { worker_bootstrap: workerBootstrap }
+      : {}),
+    ...(probeObservation
+      ? { probe_observation: probeObservation }
       : {}),
     authorized_by: authorizedBy,
     expected: {
@@ -11802,6 +12290,10 @@ function registerRole(cwd, options) {
             request.worker_bootstrap || null,
             options,
           )
+          && probeObservationRequestMatchesBinding(
+            request.probe_observation || null,
+            options,
+          )
           && pendingRegistrationIntent.request_sha256 === hashObject(request),
         'EVENT_ID_CONFLICT',
         `registration intent ${eventId} 已绑定不同请求`,
@@ -11898,6 +12390,9 @@ function registerRole(cwd, options) {
           ...(request.worker_bootstrap
             ? { worker_bootstrap: request.worker_bootstrap }
             : {}),
+          ...(request.probe_observation
+            ? { probe_observation: request.probe_observation }
+            : {}),
           capability_sha256: capability.sha256,
           capability_file: capability.file,
           authorized_by: request.authorized_by,
@@ -11941,10 +12436,21 @@ function registerRole(cwd, options) {
       };
     }
     assertFrozenInputs(cwd, loaded, options.taskId);
+    const registrationAcceptedAt =
+      pristineAuthorizationAt || nowIso();
     const workerBootstrap = registrationWorkerBootstrapBinding(
       loaded,
       state,
       options,
+    );
+    const probeObservation = registrationProbeObservationBinding(
+      loaded,
+      state,
+      {
+        ...options,
+        acceptanceTime: registrationAcceptedAt,
+      },
+      eventId,
     );
     const existingIsCurrent = existing
       && existing.registered_control_epoch === loaded.control.epoch
@@ -11971,6 +12477,14 @@ function registerRole(cwd, options) {
         ),
         'REGISTRATION_IDEMPOTENCY_MISMATCH',
         '重复 registration worker bootstrap binding 不一致',
+      );
+      assertControl(
+        probeObservationRequestMatchesBinding(
+          existing.probe_observation || null,
+          options,
+        ),
+        'REGISTRATION_IDEMPOTENCY_MISMATCH',
+        '重复 registration probe observation binding 不一致',
       );
       return { registered: true, idempotent: true, session: publicSession(existing), actor_capability_file: existing.capability_file, task_nonce: existing.task_nonce || undefined };
     }
@@ -12116,6 +12630,9 @@ function registerRole(cwd, options) {
       ...(workerBootstrap
         ? { worker_bootstrap: workerBootstrap }
         : {}),
+      ...(probeObservation
+        ? { probe_observation: probeObservation }
+        : {}),
       authorized_by: authorizedBy,
       expected: {
         state_revision: state.state_revision,
@@ -12149,7 +12666,6 @@ function registerRole(cwd, options) {
     let registrationIntent = null;
     let capability;
     const taskNonce = workerLaunchId ? randomId('nonce') : null;
-    const registrationAcceptedAt = pristineAuthorizationAt || nowIso();
     const buildRegistrationEvent = (actorCapability) => ({
       schema_version: 1,
       event_id: eventId,
@@ -12183,6 +12699,12 @@ function registerRole(cwd, options) {
           ? {
             worker_bootstrap:
               registrationRequest.worker_bootstrap,
+          }
+          : {}),
+        ...(registrationRequest.probe_observation
+          ? {
+            probe_observation:
+              registrationRequest.probe_observation,
           }
           : {}),
         capability_sha256: actorCapability.sha256,
@@ -12357,6 +12879,255 @@ function registerRole(cwd, options) {
       cwd,
       'GOAL_CONTROL_TEST_FAULT_AFTER_REGISTRATION_GENERATION',
     ),
+  });
+}
+
+function probeObservationRefreshRequest(options) {
+  return {
+    schema_version: 1,
+    kind: 'PROBE_OBSERVATION_REFRESH',
+    event_id: safeId(options.eventId, 'refresh event_id'),
+    goal_id: safeId(options.goalId, 'goal_id'),
+    task_id: safeId(options.taskId, 'task_id'),
+    role: options.role,
+    thread_id: safeId(options.threadId, 'thread_id'),
+    host_id: safeId(options.hostId || 'local', 'host_id'),
+    attempt: Number(options.attempt),
+    expected_state_revision: Number(options.expectedStateRevision),
+    expected_binding_sha256: normalizeHash(
+      options.expectedBindingSha256,
+      'expected probe observation binding sha256',
+    ),
+    probe_observation: probeObservationOptions(options),
+  };
+}
+
+function refreshProbeObservation(cwd, options) {
+  options.repositoryWorktree = fs.realpathSync(repoRoot(cwd));
+  const root = controlRoot(cwd);
+  const request = probeObservationRefreshRequest(options);
+  assertControl(
+    request.probe_observation,
+    'CANARY_OBSERVATION_REQUIRED',
+    'probe observation refresh 必须携带完整 fresh receipt request',
+  );
+  const requestSha256 = hashObject(request);
+  return withLock(root, () => {
+    const loaded = loadGoalStateUnlocked(root, request.goal_id);
+    assertControl(
+      probeObservationProtocolRequired(loaded.manifest),
+      'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
+      'manifest 未启用 probe observation refresh',
+    );
+    const state = loaded.snapshot.tasks[request.task_id];
+    assertControl(state, 'UNKNOWN_TASK', `未知 task ${request.task_id}`);
+    assertControl(
+      goalControlEventOccurrences(loaded, request.event_id).length === 0,
+      'EVENT_ID_CONFLICT',
+      `refresh event id ${request.event_id} 已被 Goal control event 使用`,
+    );
+    const occurrences = goalEventIdOccurrences(
+      loaded,
+      request.event_id,
+    );
+    assertControl(
+      occurrences.every(
+        (occurrence) => occurrence.task_id === request.task_id,
+      ),
+      'EVENT_ID_CONFLICT',
+      `refresh event id ${request.event_id} 已被其它 task 使用`,
+    );
+    if (occurrences.length > 0) {
+      assertControl(
+        occurrences.length === 1,
+        'CORRUPT_STORE',
+        `refresh event ${request.event_id} 重复`,
+      );
+      const accepted = acceptedGoalEvent(
+        root,
+        loaded,
+        request.task_id,
+        request.event_id,
+      );
+      assertControl(
+        accepted
+          && accepted.type === 'PROBE_OBSERVATION_REFRESHED'
+          && accepted.payload.request_sha256 === requestSha256,
+        'EVENT_ID_CONFLICT',
+        `refresh event ${request.event_id} 已绑定不同 request`,
+      );
+      authorizeAcceptedEventRetry(
+        loaded,
+        request.task_id,
+        accepted,
+        options.actorCapabilityFile,
+      );
+      const current = loaded.snapshot.tasks[request.task_id]
+        .sessions[request.role];
+      assertControl(
+        current
+          && current.probe_observation
+          && current.probe_observation.binding_sha256
+            === accepted.payload.probe_observation.binding_sha256,
+        'CORRUPT_STORE',
+        'accepted refresh 与 current session binding 漂移',
+      );
+      return {
+        refreshed: true,
+        idempotent: true,
+        event_id: request.event_id,
+        session: publicSession(current),
+      };
+    }
+    const {
+      assertNoPendingTaskOperations,
+    } = require('./pending-operations');
+    assertNoPendingTaskOperations(
+      root,
+      request.goal_id,
+      request.task_id,
+    );
+    assertFrozenInputs(cwd, loaded, request.task_id);
+    assertControl(
+      request.expected_state_revision === state.state_revision,
+      'STALE_STATE_REVISION',
+      'probe observation refresh state revision CAS 漂移',
+    );
+    const session = authorizeSession(
+      state,
+      options.actorCapabilityFile,
+      {
+        role: request.role,
+        threadId: request.thread_id,
+      },
+    );
+    assertControl(
+      session.host_id === request.host_id
+        && session.attempt === request.attempt,
+      'CANARY_OBSERVATION_CROSS_IDENTITY',
+      'probe observation refresh host/attempt 不匹配',
+    );
+    assertControl(
+      session.probe_observation
+        && session.probe_observation.binding_sha256
+          === request.expected_binding_sha256,
+      'CANARY_OBSERVATION_REFRESH_CAS_MISMATCH',
+      'probe observation refresh old binding CAS 漂移',
+    );
+    const acceptedAt = nowIso();
+    assertRequiredLiveProbeObservationBinding(
+      loaded.manifest,
+      session,
+      'probe observation refresh previous binding',
+      Date.parse(acceptedAt),
+      {
+        repositoryHead: git(
+          options.invocationCwd || cwd,
+          ['rev-parse', 'HEAD'],
+        ),
+        role: request.role,
+        taskId: request.task_id,
+      },
+    );
+    const refreshed = registrationProbeObservationBinding(
+      loaded,
+      state,
+      {
+        ...options,
+        goalId: request.goal_id,
+        taskId: request.task_id,
+        role: request.role,
+        threadId: request.thread_id,
+        hostId: request.host_id,
+        attempt: request.attempt,
+        acceptanceTime: acceptedAt,
+      },
+      request.event_id,
+    );
+    assertControl(
+      refreshed.binding_sha256 !== request.expected_binding_sha256
+        && refreshed.accepted_at === acceptedAt,
+      'CANARY_OBSERVATION_REFRESH_INVALID',
+      'fresh probe observation 未替换 old binding',
+    );
+    const actorKey = actorSequenceKey({
+      role: request.role,
+      thread_id: request.thread_id,
+      host_id: request.host_id,
+    });
+    const event = validateEvent({
+      schema_version: 1,
+      event_id: request.event_id,
+      goal_id: request.goal_id,
+      task_id: request.task_id,
+      type: 'PROBE_OBSERVATION_REFRESHED',
+      actor: {
+        role: request.role,
+        thread_id: request.thread_id,
+        host_id: request.host_id,
+      },
+      actor_sequence: (state.actor_sequences[actorKey] || 0) + 1,
+      expected_state_revision: state.state_revision,
+      control_epoch: loaded.control.epoch,
+      packet: {
+        revision: state.packet.revision,
+        sha256: state.packet.sha256,
+      },
+      base_head: state.base_head,
+      full_head: state.full_head,
+      payload: {
+        role: request.role,
+        attempt: request.attempt,
+        previous_binding_sha256: request.expected_binding_sha256,
+        probe_observation: refreshed,
+        request_sha256: requestSha256,
+      },
+    });
+    event.input_sha256 = hashObject(event);
+    event.accepted_at = acceptedAt;
+    const nextState = applyEvent(state, event, loaded.control.epoch);
+    const durableCommit = writeAcceptedEvent(
+      root,
+      request.goal_id,
+      request.task_id,
+      nextState.state_revision,
+      event,
+      loaded.lastEventHashes[request.task_id] || null,
+    );
+    nextState.last_event.event_sha256 =
+      durableCommit.event.event_sha256;
+    loaded.snapshot.tasks[request.task_id] = nextState;
+    loaded.snapshot.generated_at = nowIso();
+    let cacheDegraded = Boolean(durableCommit.headError);
+    try {
+      writeProjections(
+        loaded.paths,
+        loaded.manifest,
+        loaded.snapshot,
+      );
+    } catch {
+      cacheDegraded = true;
+    }
+    return {
+      refreshed: true,
+      idempotent: false,
+      cache_degraded: cacheDegraded,
+      event_id: request.event_id,
+      session: publicSession(nextState.sessions[request.role]),
+    };
+  }, {
+    transactionKey: () => canonicalTransactionKey(
+      'PROBE_OBSERVATION_REFRESH',
+      {
+        goal_id: request.goal_id,
+        task_id: request.task_id,
+      },
+      request.event_id,
+      requestSha256,
+    ),
+    sameStableOperationMismatchCode: 'EVENT_ID_CONFLICT',
+    sameStableOperationMismatchMessage:
+      'probe observation refresh stable event 已绑定不同 request',
   });
 }
 
@@ -13491,9 +14262,14 @@ module.exports = {
   validateCandidateBoundary,
   nextTasks,
   publicSnapshot,
+  prepareProbeObservationChallenge,
+  refreshProbeObservation,
   rebuildLedger,
+  recoveryIntentMatchesOptions,
   recoverExpiredForeman,
   registerRole,
   retryAcceptedCommandEvent,
   resumeCapsule,
+  taskActionProjection,
+  validateRoleLaunchBoundary,
 };

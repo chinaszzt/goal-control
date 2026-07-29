@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { assertControl } = require('./errors');
@@ -25,6 +26,8 @@ const WORKER_CANARY_BOOTSTRAP_PROTOCOL =
   'goalctl-worker-canary-bootstrap-v1';
 const WORKER_CANARY_BOOTSTRAP_POLICY_MARKER =
   `Worker-Canary-Bootstrap-Protocol: ${WORKER_CANARY_BOOTSTRAP_PROTOCOL}`;
+const PROBE_OBSERVATION_RECEIPT_PROTOCOL =
+  'goalctl-sealed-probe-observation-v1';
 const P1_COMMIT_REF_RE = /^refs\/heads\/codex\/goal-control\/p1\/[0-9a-f]{64}\/[0-9a-f]{64}\/cycle-[1-9][0-9]*$/;
 const EVENT_PAYLOAD_KEYS = Object.freeze({
   START_P1: ['required_start_head', 'p1_worktree', 'p1_branch'],
@@ -94,7 +97,14 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'pr_contract_sha256',
   ],
   ARCHIVED: ['evidence_id'],
-  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'goal_foreman_projection', 'projected_lease_until'],
+  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'probe_observation', 'goal_foreman_projection', 'projected_lease_until'],
+  PROBE_OBSERVATION_REFRESHED: [
+    'role',
+    'attempt',
+    'previous_binding_sha256',
+    'probe_observation',
+    'request_sha256',
+  ],
   HEARTBEAT: ['lease_ms', 'status'],
   CONTROL_RECONCILED: ['control_event_id', 'instruction_ref'],
   ADD_HOLD: ['kind', 'hold_id', 'reason', 'evidence_id'],
@@ -175,6 +185,7 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'reason',
     'incident_ref',
     'request_sha256',
+    'probe_observation',
     'root_recovery_id',
     'goal_scope',
     'goal_scope_sha256',
@@ -244,6 +255,8 @@ const EVENT_PAYLOAD_REQUIRED = Object.freeze({
     'capability_file',
     'authorized_by',
   ],
+  PROBE_OBSERVATION_REFRESHED:
+    EVENT_PAYLOAD_KEYS.PROBE_OBSERVATION_REFRESHED,
   HEARTBEAT: [],
   CONTROL_RECONCILED: EVENT_PAYLOAD_KEYS.CONTROL_RECONCILED,
   ADD_HOLD: ['kind', 'evidence_id'],
@@ -513,7 +526,7 @@ function assertNoSensitiveKeys(value, label, code) {
 
 function validateManifest(manifest, manifestFile, repositoryRoot) {
   assertPlainObject(manifest, 'INVALID_MANIFEST', 'manifest');
-  assertOnlyKeys(manifest, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'tasks'], 'INVALID_MANIFEST', 'manifest');
+  assertOnlyKeys(manifest, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'probe_observation_receipts', 'tasks'], 'INVALID_MANIFEST', 'manifest');
   assertControl(manifest.schema_version === 1, 'UNSUPPORTED_SCHEMA', 'manifest.schema_version 必须为 1');
   const goalId = entityId(manifest.goal_id, 'goal_id', 'INVALID_MANIFEST');
   if (manifest.title !== undefined) nonEmptyString(manifest.title, 'manifest.title', 'INVALID_MANIFEST', 200);
@@ -604,6 +617,120 @@ function validateManifest(manifest, manifestFile, repositoryRoot) {
       policy: {
         path: policyPath,
         sha256: computedPolicySha256,
+      },
+    };
+  }
+
+  let probeObservationReceipts;
+  if (manifest.probe_observation_receipts !== undefined) {
+    assertPlainObject(
+      manifest.probe_observation_receipts,
+      'INVALID_MANIFEST',
+      'manifest.probe_observation_receipts',
+    );
+    assertOnlyKeys(
+      manifest.probe_observation_receipts,
+      ['protocol', 'max_ttl_ms', 'host_attestation'],
+      'INVALID_MANIFEST',
+      'manifest.probe_observation_receipts',
+    );
+    assertControl(
+      manifest.probe_observation_receipts.protocol
+        === PROBE_OBSERVATION_RECEIPT_PROTOCOL,
+      'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
+      `probe observation protocol 必须是 ${
+        PROBE_OBSERVATION_RECEIPT_PROTOCOL
+      }`,
+    );
+    assertControl(
+      Number.isSafeInteger(
+        manifest.probe_observation_receipts.max_ttl_ms,
+      )
+        && manifest.probe_observation_receipts.max_ttl_ms >= 1000
+        && manifest.probe_observation_receipts.max_ttl_ms <= 900000,
+      'INVALID_MANIFEST',
+      'probe_observation_receipts.max_ttl_ms 必须在 1000-900000',
+    );
+    assertPlainObject(
+      manifest.probe_observation_receipts.host_attestation,
+      'INVALID_MANIFEST',
+      'manifest.probe_observation_receipts.host_attestation',
+    );
+    assertOnlyKeys(
+      manifest.probe_observation_receipts.host_attestation,
+      [
+        'algorithm',
+        'key_id',
+        'public_key_sha256',
+        'public_key_spki_base64',
+      ],
+      'INVALID_MANIFEST',
+      'manifest.probe_observation_receipts.host_attestation',
+    );
+    const hostAttestation =
+      manifest.probe_observation_receipts.host_attestation;
+    assertControl(
+      hostAttestation.algorithm === 'ED25519',
+      'INVALID_MANIFEST',
+      'probe observation host attestation algorithm 必须是 ED25519',
+    );
+    const attestationKeyId = safeId(
+      hostAttestation.key_id,
+      'probe_observation_receipts.host_attestation.key_id',
+    );
+    const publicKeySha256 = normalizeHash(
+      hostAttestation.public_key_sha256,
+      'probe_observation_receipts.host_attestation.public_key_sha256',
+    );
+    assertControl(
+      typeof hostAttestation.public_key_spki_base64 === 'string'
+        && /^[A-Za-z0-9+/]+={0,2}$/.test(
+          hostAttestation.public_key_spki_base64,
+        )
+        && hostAttestation.public_key_spki_base64.length <= 256,
+      'INVALID_MANIFEST',
+      'probe observation host attestation public key 必须是有界 base64 SPKI',
+    );
+    let publicKeyDer;
+    let publicKey;
+    try {
+      publicKeyDer = Buffer.from(
+        hostAttestation.public_key_spki_base64,
+        'base64',
+      );
+      publicKey = crypto.createPublicKey({
+        key: publicKeyDer,
+        format: 'der',
+        type: 'spki',
+      });
+    } catch (error) {
+      assertControl(
+        false,
+        'INVALID_MANIFEST',
+        `probe observation host attestation public key 非法: ${error.message}`,
+      );
+    }
+    assertControl(
+      publicKey
+        && publicKey.asymmetricKeyType === 'ed25519'
+        && publicKey.export({ format: 'der', type: 'spki' })
+          .equals(publicKeyDer)
+        && `sha256:${crypto
+          .createHash('sha256')
+          .update(publicKeyDer)
+          .digest('hex')}` === publicKeySha256,
+      'INVALID_MANIFEST',
+      'probe observation host attestation 必须是 canonical Ed25519 SPKI 且 hash 匹配',
+    );
+    probeObservationReceipts = {
+      protocol: PROBE_OBSERVATION_RECEIPT_PROTOCOL,
+      max_ttl_ms: manifest.probe_observation_receipts.max_ttl_ms,
+      host_attestation: {
+        algorithm: 'ED25519',
+        key_id: attestationKeyId,
+        public_key_sha256: publicKeySha256,
+        public_key_spki_base64:
+          hostAttestation.public_key_spki_base64,
       },
     };
   }
@@ -961,6 +1088,9 @@ function validateManifest(manifest, manifestFile, repositoryRoot) {
     ...(workerCanaryBootstrap
       ? { worker_canary_bootstrap: workerCanaryBootstrap }
       : {}),
+    ...(probeObservationReceipts
+      ? { probe_observation_receipts: probeObservationReceipts }
+      : {}),
     source_manifest: path.relative(fs.realpathSync(repositoryRoot), fs.realpathSync(manifestFile)).split(path.sep).join('/'),
     tasks: orderedTasks,
   };
@@ -1168,6 +1298,22 @@ function validateEvent(event) {
     validateWorkerBootstrapBinding(
       payload.worker_bootstrap,
       'REGISTER_ROLE.payload.worker_bootstrap',
+    );
+  }
+  if (
+    [
+      'REGISTER_ROLE',
+      'RECOVER_EXPIRED_FOREMAN',
+      'PROBE_OBSERVATION_REFRESHED',
+    ].includes(event.type)
+      && payload.probe_observation !== undefined
+  ) {
+    const {
+      validateBinding,
+    } = require('./canary-observation-receipt');
+    validateBinding(
+      payload.probe_observation,
+      `${event.type}.payload.probe_observation`,
     );
   }
   if (
@@ -1636,6 +1782,7 @@ module.exports = {
   HOLD_KINDS,
   ROLES,
   WORKER_CANARY_BOOTSTRAP_POLICY_MARKER,
+  PROBE_OBSERVATION_RECEIPT_PROTOCOL,
   WORKER_CANARY_BOOTSTRAP_PROTOCOL,
   assertLiveRoleLostTargetBinding,
   matchesMechanicalP1WritePattern,

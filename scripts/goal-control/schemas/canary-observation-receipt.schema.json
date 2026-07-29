@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chinaszzt.github.io/goal-control/schemas/canary-observation-receipt.schema.json",
+  "title": "Sealed structured probe observation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "stable_id",
+    "challenge",
+    "canary_plan_sha256",
+    "goal_id",
+    "task_id",
+    "role",
+    "producer",
+    "replay_result",
+    "target_identity_sha256",
+    "target_fingerprint_sha256",
+    "probe_results",
+    "aggregate_disposition",
+    "observed_at",
+    "expires_at",
+    "ttl_ms",
+    "receipt_attestation",
+    "receipt_binding_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "SEALED_PROBE_OBSERVATION_RECEIPT" },
+    "stable_id": { "$ref": "#/$defs/id" },
+    "challenge": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "canary_plan_sha256": { "$ref": "#/$defs/sha256" },
+    "goal_id": { "$ref": "#/$defs/id" },
+    "task_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/id" },
+        { "type": "null" }
+      ]
+    },
+    "role": {
+      "enum": ["FOREMAN", "CAPTAIN", "DEV", "REVIEW", "RECEIPT"]
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thread_id", "host_id", "attempt", "namespace"],
+      "properties": {
+        "thread_id": { "$ref": "#/$defs/id" },
+        "host_id": { "$ref": "#/$defs/id" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "namespace": {
+          "enum": ["HOST_ADAPTER", "ISOLATED_TEST_FAKE"]
+        }
+      }
+    },
+    "target_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "target_fingerprint_sha256": { "$ref": "#/$defs/sha256" },
+    "replay_result": { "$ref": "#/$defs/probeResult" },
+    "probe_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/probeResult" }
+    },
+    "aggregate_disposition": { "$ref": "#/$defs/disposition" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "ttl_ms": { "type": "integer", "minimum": 1, "maximum": 900000 },
+    "receipt_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "public_key_sha256",
+        "signature_base64url"
+      ],
+      "properties": {
+        "algorithm": { "const": "ED25519" },
+        "key_id": { "$ref": "#/$defs/id" },
+        "public_key_sha256": { "$ref": "#/$defs/sha256" },
+        "signature_base64url": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
+    "receipt_binding_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "disposition": {
+      "enum": [
+        "PASS",
+        "PROVISIONAL_KNOWN_LIMITATION",
+        "KNOWN_LIMITATION",
+        "FAIL"
+      ]
+    },
+    "probeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "probe",
+        "adapter",
+        "disposition",
+        "target_identity_sha256",
+        "result_fingerprint_sha256",
+        "evidence_refs",
+        "interactive"
+        ,"limitation"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "probe": { "$ref": "#/$defs/id" },
+        "adapter": {
+          "enum": [
+            "GITHUB_CLI",
+            "GIT_TRANSPORT",
+            "GITHUB_APP",
+            "BROWSER",
+            "TASK_BROKER",
+            "CONTROLLER_CLI"
+          ]
+        },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "target_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "result_fingerprint_sha256": { "$ref": "#/$defs/sha256" },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id", "sha256"],
+            "properties": {
+              "kind": { "const": "HOST_ADAPTER_EVIDENCE" },
+              "id": {
+                "type": "string",
+                "pattern": "^controller-evidence-v1-[0-9a-f]{64}$"
+              },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        "interactive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allow_prompt", "auth_prompt"],
+          "properties": {
+            "allow_prompt": { "type": "boolean" },
+            "auth_prompt": { "type": "boolean" }
+          }
+        },
+        "limitation": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "exact_match"],
+              "properties": {
+                "id": { "$ref": "#/$defs/id" },
+                "exact_match": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "semantic_operation",
+                    "target_kind",
+                    "repository",
+                    "result_fingerprint",
+                    "allow_dialog",
+                    "authentication_prompt"
+                  ],
+                  "properties": {
+                    "semantic_operation": {
+                      "const": "REPOSITORY_METADATA_READ"
+                    },
+                    "target_kind": { "const": "REPOSITORY" },
+                    "repository": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "result_fingerprint": {
+                      "const": "404/repo_not_found"
+                    },
+                    "allow_dialog": { "const": false },
+                    "authentication_prompt": { "const": false }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

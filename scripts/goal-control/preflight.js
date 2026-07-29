@@ -34,6 +34,9 @@ const {
 } = require('./incident-authority');
 const { assertOperationalScope, sessionOperationalScope } = require('./operational-scope');
 const {
+  assertRequiredLiveBinding: assertRequiredLiveProbeObservationBinding,
+} = require('./canary-observation-receipt');
+const {
   assertLaunchRuntimeIncarnation,
   assertRotationSuccessorLaunch,
   isRuntimeRotationHoldLane,
@@ -1562,7 +1565,7 @@ function commitPreflightEvidence(
       full_head: actualHead,
       status: committedStatus,
       checks: committedChecks,
-      created_at: nowIso(),
+      created_at: boundary.acceptedAt,
       acceptance_anchor: evidenceAcceptanceAnchor(task, session),
       ...(committedStatus === 'PASS'
         ? { runtime_launch_anchor: runtimeLaunchAnchor }
@@ -1663,6 +1666,18 @@ function commitPreflightEvidence(
         threadId: launch.thread.id,
       });
       assertFrozenInputs(cwd, loaded, launch.task_id);
+      const receiptAcceptedAt = nowIso();
+      assertRequiredLiveProbeObservationBinding(
+        loaded.manifest,
+        session,
+        'PREFLIGHT durable commit',
+        Date.parse(receiptAcceptedAt),
+        {
+          repositoryHead: task.full_head,
+          role: launch.role,
+          taskId: launch.task_id,
+        },
+      );
       assertOperationalScope(task, launch.role, 'PREFLIGHT');
       assertControl(!task.recovery, 'RECOVERY_REQUIRED', 'preflight commit 前 recovery 状态已漂移');
       assertControl(
@@ -1745,7 +1760,12 @@ function commitPreflightEvidence(
           },
         );
       }
-      boundary = { loaded, task, session };
+      boundary = {
+        loaded,
+        task,
+        session,
+        acceptedAt: receiptAcceptedAt,
+      };
     },
     authorizeOddRecovery: () => Boolean(
       boundary && (boundary.retry || boundary.prepared),
@@ -1830,6 +1850,17 @@ function runPreflight(cwd, options, dependencies = {}) {
     launch,
   );
   assertFrozenInputs(cwd, loaded, launch.task_id);
+  assertRequiredLiveProbeObservationBinding(
+    loaded.manifest,
+    authorizedSession,
+    'PREFLIGHT',
+    undefined,
+    {
+      repositoryHead: task.full_head,
+      role: launch.role,
+      taskId: launch.task_id,
+    },
+  );
   assertOperationalScope(task, launch.role, 'PREFLIGHT');
   assertControl(!task.recovery, 'RECOVERY_REQUIRED', `preflight 前必须先闭合 ${task.recovery && task.recovery.role} recovery`);
   assertControl(

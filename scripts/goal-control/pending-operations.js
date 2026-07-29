@@ -1898,7 +1898,7 @@ function listPendingSourceCheckpointOperations(root, goalId, taskId) {
   return pending;
 }
 
-function listPendingTaskOperations(root, goalId, taskId) {
+function listPendingTaskOperations(root, goalId, taskId, options = {}) {
   safeId(goalId, 'goal_id');
   safeId(taskId, 'task_id');
   const pending = [];
@@ -1913,8 +1913,10 @@ function listPendingTaskOperations(root, goalId, taskId) {
     pending.push(operation);
   };
 
-  for (const operation of listPendingGoalOperations(root, goalId)) {
-    add(operation);
+  if (options.excludeGoalOperations !== true) {
+    for (const operation of listPendingGoalOperations(root, goalId)) {
+      add(operation);
+    }
   }
 
   for (const operation of listPendingResourceOperations(root)) {
@@ -2231,7 +2233,7 @@ function assertNoPendingTaskOperations(
   options = {},
 ) {
   return assertNoPending(
-    listPendingTaskOperations(root, goalId, taskId),
+    listPendingTaskOperations(root, goalId, taskId, options),
     options,
     `task ${taskId}`,
   );

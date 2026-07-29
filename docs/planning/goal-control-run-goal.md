@@ -438,7 +438,7 @@ controller 只验证当前实际 session。
   实际 PR 生成后仍在对应正常流程中另验。App 是 required probes 的最后一项；
   `gh` PASS 不能推出 App PASS，反之亦然。只有 hash-bound policy marker + exact
   `404/repo_not_found` 能进入 PROVISIONAL；同 session 的全部补偿项 PASS 后才最终记
-  `KNOWN_CONNECTOR_LIMITATION`；
+  `KNOWN_LIMITATION`；
 - 登记前 shell `gh` 也只探测上述 canonical repository；CAPTAIN/REVIEW/RECEIPT 不得
   猜一个尚未由 plan hash 绑定的 PR。实际 PR 出现后，再按角色职责对 exact PR/check/diff
   独立验证；
@@ -454,9 +454,11 @@ controller 只验证当前实际 session。
 只记录角色、session/host、工具身份、时间、PASS/FAIL、fingerprint 和 evidence ref。
 不得把 token、cookie、Keychain 内容或 capability bytes 写进聊天、packet、launch 或
 仓库。
-v1 controller 机械生成并 hash operation/顺序/聚合合同，但尚未接收结构化 probe
-observation receipt；上级必须复核实际 session 的 evidence，不能把自由文本
-`CANARY_PASS` 宣称成 controller 已机械证明调用顺序。
+启用 manifest-bound `probe_observation_receipts` 时，host adapter 必须提交绑定
+controller challenge、canonical plan、实际 session 身份、显式 replay 与 ordered
+results 的 Ed25519-attested structured receipt；controller core 只机械验 schema、
+签名、顺序、identity、TTL、聚合和 durable bytes。自由文本 `CANARY_PASS` 与聊天摘要
+永远不能替代 sealed evidence，receipt PASS 前不开放 registration、launch 或 FULL。
 
 ## 4. 失败如何落状态
 

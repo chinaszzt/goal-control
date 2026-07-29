@@ -50,8 +50,11 @@ GitHub App 的当前已知限制只认 policy 中独立 exact 行
 `GitHub-App-Known-Limitation: github_app_private_repo_404-v1`。full canary plan 把
 repository metadata 语义 operation、禁止的 commit/PR/file/issue substitute、App-last
 顺序、同-session 补偿列表和聚合条件写入 hash；旧 policy 无该 marker 时不获得例外。
-当前 v1 尚未消费结构化 probe observation receipt，因此 plan 是机械合同，不是对实际
-执行顺序的机械证明；上级仍须审计 session evidence。
+启用 `probe_observation_receipts` 时，host adapter 必须把 replay 与 ordered probe
+results 封装为 Ed25519-attested structured receipt；controller core 只按 manifest
+冻结的公钥机械验 challenge、canonical plan、identity、顺序、TTL 与 aggregate，并在
+登记、公开 `LAUNCH_*`、实际 launch/preflight/FULL 边界实时重验 durable sealed bytes。
+自由文本或聊天转述不构成执行顺序证据。
 
 1. [`session-protocol/role-kernel.md`](session-protocol/role-kernel.md)；
 2. [`session-protocol/shared.md`](session-protocol/shared.md)；

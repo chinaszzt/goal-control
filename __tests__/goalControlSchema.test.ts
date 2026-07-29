@@ -21,6 +21,65 @@ function readJson(relative: string): Record<string, any> {
 }
 
 describe("goal-control machine contract schemas", () => {
+  it("defines the canonical sealed probe observation receipt contract", () => {
+    const schema = readJson(
+      "scripts/goal-control/schemas/canary-observation-receipt.schema.json",
+    );
+    expect(schema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        schema_version: { const: 1 },
+        kind: { const: "SEALED_PROBE_OBSERVATION_RECEIPT" },
+        aggregate_disposition: {
+          $ref: "#/$defs/disposition",
+        },
+        receipt_attestation: {
+          type: "object",
+          additionalProperties: false,
+        },
+      },
+      $defs: {
+        disposition: {
+          enum: [
+            "PASS",
+            "PROVISIONAL_KNOWN_LIMITATION",
+            "KNOWN_LIMITATION",
+            "FAIL",
+          ],
+        },
+      },
+    });
+    expect(schema.required).toEqual(expect.arrayContaining([
+      "canary_plan_sha256",
+      "goal_id",
+      "task_id",
+      "role",
+      "producer",
+      "target_identity_sha256",
+      "target_fingerprint_sha256",
+      "probe_results",
+      "observed_at",
+      "expires_at",
+      "ttl_ms",
+      "receipt_attestation",
+      "receipt_binding_sha256",
+    ]));
+    const limitation = schema.$defs.probeResult.properties.limitation
+      .oneOf[1];
+    expect(limitation).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "exact_match"],
+      properties: {
+        exact_match: {
+          type: "object",
+          additionalProperties: false,
+        },
+      },
+    });
+  });
+
   it("keeps worker canary bootstrap manifest schema aligned with runtime validation", () => {
     const schema = readJson(
       "scripts/goal-control/schemas/goal-manifest.schema.json",
