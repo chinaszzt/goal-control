@@ -13,6 +13,8 @@ const {
 const { ControlError, assertControl } = require('./errors');
 const {
   WORKER_ROLES: BOOTSTRAP_WORKER_ROLES,
+  loadCaptainRequiredStartHeadProof,
+  validateCaptainBootstrapReceipt,
   validateWorkerBootstrapReceipt,
 } = require('./canary-bootstrap');
 const {
@@ -33,6 +35,7 @@ const {
   trustedGitExecutable,
 } = require('./util');
 const {
+  CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER,
   WORKER_CANARY_BOOTSTRAP_POLICY_MARKER,
   validateManifest,
 } = require('./validation');
@@ -62,6 +65,8 @@ const GITHUB_APP_KNOWN_LIMITATION_POLICY_MARKER =
   + GITHUB_APP_KNOWN_LIMITATION_ID;
 const WORKER_CANARY_BOOTSTRAP_POLICY_PREFIX =
   'Worker-Canary-Bootstrap-Protocol:';
+const CAPTAIN_CANARY_BOOTSTRAP_POLICY_PREFIX =
+  'Captain-Canary-Bootstrap-Protocol:';
 
 const ROLE_PROBES = Object.freeze({
   FOREMAN: Object.freeze([
@@ -339,6 +344,12 @@ function committedInputs(manifest) {
       'worker_canary_bootstrap.policy',
     );
   }
+  if (manifest.captain_canary_bootstrap) {
+    inputs.set(
+      manifest.captain_canary_bootstrap.policy.path,
+      'captain_canary_bootstrap.policy',
+    );
+  }
   for (const task of manifest.tasks) {
     inputs.set(task.packet.path, `${task.id}.packet`);
     if (task.p1) {
@@ -348,16 +359,23 @@ function committedInputs(manifest) {
   return inputs;
 }
 
-function canaryPolicyKnownLimitations(policyBytes) {
+function canaryPolicyKnownLimitations(
+  policyBytes,
+  bootstrapPolicy = {
+    prefix: WORKER_CANARY_BOOTSTRAP_POLICY_PREFIX,
+    marker: WORKER_CANARY_BOOTSTRAP_POLICY_MARKER,
+    label: 'worker',
+  },
+) {
   const lines = policyBytes.toString('utf8').split(/\r?\n/);
   const bootstrapMarkers = lines.filter(
-    (line) => line.startsWith(WORKER_CANARY_BOOTSTRAP_POLICY_PREFIX),
+    (line) => line.startsWith(bootstrapPolicy.prefix),
   );
   assertControl(
     bootstrapMarkers.length === 1
-      && bootstrapMarkers[0] === WORKER_CANARY_BOOTSTRAP_POLICY_MARKER,
+      && bootstrapMarkers[0] === bootstrapPolicy.marker,
     'CANARY_POLICY_BOOTSTRAP_MARKER_INVALID',
-    'stable committed canary policy 必须且只能包含一个 exact worker bootstrap marker',
+    `stable committed canary policy 必须且只能包含一个 exact ${bootstrapPolicy.label} bootstrap marker`,
   );
   const declaredKnownLimitations = lines.filter(
     (line) => line.startsWith(GITHUB_APP_KNOWN_LIMITATION_POLICY_PREFIX),
@@ -385,19 +403,40 @@ function canaryPolicyKnownLimitations(policyBytes) {
     }];
 }
 
-function canaryPolicyContract(manifest, inputCaptures) {
-  if (!manifest.worker_canary_bootstrap) return null;
-  const policy = manifest.worker_canary_bootstrap.policy;
+function canaryPolicyContract(manifest, inputCaptures, role) {
+  const captainBootstrap = role === 'CAPTAIN'
+    && manifest.captain_canary_bootstrap;
+  const worker = BOOTSTRAP_WORKER_ROLES.includes(role)
+    && manifest.worker_canary_bootstrap;
+  // Preserve the frozen bootstrap-v1 policy contract for every legacy role.
+  // Before CAPTAIN bootstrap existed, CAPTAIN and FOREMAN still consumed
+  // worker_canary_bootstrap.policy for the exact repository-metadata 404
+  // known-limitation contract. Only the new CAPTAIN bootstrap profile selects
+  // the separate captain policy marker.
+  const config = captainBootstrap
+    || worker
+    || manifest.worker_canary_bootstrap;
+  if (!config) return null;
+  const policy = config.policy;
   const capture = inputCaptures.get(policy.path);
   assertControl(
     capture && capture.sha256 === policy.sha256,
     'GOAL_INPUT_DIRTY',
-    'worker_canary_bootstrap.policy hash 与 committed capture 不一致',
+    'role bootstrap policy hash 与 committed capture 不一致',
   );
   return {
     path: policy.path,
     sha256: policy.sha256,
-    known_limitations: canaryPolicyKnownLimitations(capture.bytes),
+    known_limitations: canaryPolicyKnownLimitations(
+      capture.bytes,
+      captainBootstrap
+        ? {
+          prefix: CAPTAIN_CANARY_BOOTSTRAP_POLICY_PREFIX,
+          marker: CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER,
+          label: 'captain',
+        }
+        : undefined,
+    ),
   };
 }
 
@@ -1192,10 +1231,36 @@ function canaryPlan(
     options.workerThread,
     options.workerHost,
   ].filter((value) => value !== null && value !== undefined).length;
+  const captainBootstrapArgumentsPresent = [
+    options.captainBootstrapReceipt,
+    options.captainBootstrapReceiptSha256,
+    options.captainBootstrapOperationId,
+    options.captainBootstrapChallenge,
+    options.captainBootstrapIdentityPlanSha256,
+    options.captainThread,
+    options.captainHost,
+  ].filter((value) => value !== null && value !== undefined).length;
   assertControl(
     bootstrapArgumentsPresent === 0 || bootstrapArgumentsPresent === 7,
     'CANARY_BOOTSTRAP_ARGUMENT_MISMATCH',
     'worker bootstrap receipt/hash/operation/challenge/plan/thread/host 必须同时提供或同时省略',
+  );
+  assertControl(
+    captainBootstrapArgumentsPresent === 0
+      || captainBootstrapArgumentsPresent === 7,
+    'CANARY_BOOTSTRAP_ARGUMENT_MISMATCH',
+    'captain bootstrap receipt/hash/operation/challenge/plan/thread/host 必须同时提供或同时省略',
+  );
+  assertControl(
+    captainBootstrapArgumentsPresent === 0 || role === 'CAPTAIN',
+    'CANARY_BOOTSTRAP_ROLE_INVALID',
+    'captain bootstrap receipt 只允许 CAPTAIN',
+  );
+  assertControl(
+    !(bootstrapArgumentsPresent > 0
+      && captainBootstrapArgumentsPresent > 0),
+    'CANARY_BOOTSTRAP_ARGUMENT_MISMATCH',
+    'worker 与 captain bootstrap binding 不得同时提供',
   );
   assertControl(
     bootstrapArgumentsPresent === 0
@@ -1217,6 +1282,21 @@ function canaryPlan(
       bootstrapArgumentsPresent === 0,
       'WORKER_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
       '当前 manifest/role 不接受 worker canary bootstrap receipt',
+    );
+  }
+  const captainBootstrapProtocolEnabled =
+    manifest.captain_canary_bootstrap !== undefined;
+  if (captainBootstrapProtocolEnabled && role === 'CAPTAIN') {
+    assertControl(
+      captainBootstrapArgumentsPresent === 7,
+      'CANARY_BOOTSTRAP_REQUIRED',
+      'manifest 启用 captain canary bootstrap 后，CAPTAIN 必须提供 receipt/hash/operation/challenge/plan/thread/host',
+    );
+  } else {
+    assertControl(
+      captainBootstrapArgumentsPresent === 0,
+      'CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
+      '当前 manifest/role 不接受 captain canary bootstrap receipt',
     );
   }
   const workerBootstrapValidation = bootstrapArgumentsPresent === 0
@@ -1249,6 +1329,45 @@ function canaryPlan(
   const workerBootstrap = workerBootstrapValidation === null
     ? null
     : validateWorkerBootstrapReceipt(workerBootstrapValidation);
+  const captainBootstrapValidation =
+    captainBootstrapArgumentsPresent === 0
+      ? null
+      : {
+        receiptFile: options.captainBootstrapReceipt,
+        expectedReceiptSha256:
+          options.captainBootstrapReceiptSha256,
+        expectedOperationId: options.captainBootstrapOperationId,
+        expectedChallenge: options.captainBootstrapChallenge,
+        expectedIdentityPlanSha256:
+          options.captainBootstrapIdentityPlanSha256,
+        workerThread: options.captainThread,
+        workerHost: options.captainHost,
+        invocationCwd,
+        controller: controllerCapture.provenance,
+        repositoryRoot,
+        repositoryHead: initialHead,
+        manifestPath: manifestRelative,
+        manifestSha256: firstManifestCheck.sha256,
+        validatedManifestSha256: manifest.manifest_sha256,
+        repositoryNameWithOwner:
+          manifest.repository.name_with_owner,
+        baseBranch: manifest.repository.base_branch,
+        goalId: manifest.goal_id,
+        taskId,
+        role,
+        canaryPolicy: manifest.captain_canary_bootstrap.policy,
+        requiredStartHeadProof:
+          loadCaptainRequiredStartHeadProof(
+            repositoryRoot,
+            manifest,
+            selectedTask,
+          ),
+      };
+  const captainBootstrap = captainBootstrapValidation === null
+    ? null
+    : validateCaptainBootstrapReceipt(
+      captainBootstrapValidation,
+    );
   const matches = browserRequirements(manifest, role, selectedTask);
   const browserRequired = matches.length > 0;
   const browserBinding = {
@@ -1263,7 +1382,11 @@ function canaryPlan(
     controllerCapture.provenance,
     dependencies,
   );
-  const canaryPolicy = canaryPolicyContract(manifest, inputCaptures);
+  const canaryPolicy = canaryPolicyContract(
+    manifest,
+    inputCaptures,
+    role,
+  );
   const requiredProbes = orderedRequiredProbes(role, browserRequired);
   for (const [relative, label] of inputs) {
     const finalInput = assertCommittedOrdinaryFile(
@@ -1316,6 +1439,17 @@ function canaryPlan(
       'worker bootstrap receipt/live worktree 在 plan 计算期间漂移',
     );
   }
+  if (captainBootstrapValidation !== null) {
+    const finalCaptainBootstrap = validateCaptainBootstrapReceipt(
+      captainBootstrapValidation,
+    );
+    assertControl(
+      hashObject(finalCaptainBootstrap)
+        === hashObject(captainBootstrap),
+      'CANARY_BOOTSTRAP_RECEIPT_BINDING_MISMATCH',
+      'captain bootstrap receipt/live worktree 在 plan 计算期间漂移',
+    );
+  }
   assertControllerProvenanceStable(controllerCapture);
   const replayArgv = [
     controllerCapture.provenance.entrypoint,
@@ -1353,6 +1487,26 @@ function canaryPlan(
           workerBootstrap.thread,
           '--worker-host',
           workerBootstrap.host,
+        ]
+    ),
+    ...(
+      captainBootstrap === null
+        ? []
+        : [
+          '--captain-bootstrap-receipt',
+          captainBootstrap.receipt_file,
+          '--captain-bootstrap-receipt-sha256',
+          captainBootstrap.receipt_sha256,
+          '--captain-bootstrap-operation-id',
+          captainBootstrap.operation_id,
+          '--captain-bootstrap-challenge',
+          captainBootstrap.challenge,
+          '--captain-bootstrap-identity-plan-sha256',
+          captainBootstrap.identity_plan_sha256,
+          '--captain-thread',
+          captainBootstrap.thread,
+          '--captain-host',
+          captainBootstrap.host,
         ]
     ),
     '--json',
@@ -1411,6 +1565,7 @@ function canaryPlan(
     role,
     task_id: taskId,
     worker_bootstrap: workerBootstrap,
+    captain_bootstrap: captainBootstrap,
     canary_policy: canaryPolicy,
     probe_bindings: {
       git_push_dry_run: (

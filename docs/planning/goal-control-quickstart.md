@@ -523,6 +523,50 @@ state 继续调度。
 
 ## 4. 启动 DEV / REVIEW / RECEIPT
 
+### CAPTAIN detached linked worktree
+
+CAPTAIN 可能以 detached linked worktree 创建时，fresh scaffold spec/manifest 必须单独
+包含 `captain_canary_bootstrap.protocol=goalctl-captain-canary-bootstrap-v1` 与
+committed policy path/hash；policy 必须包含：
+
+```text
+Captain-Canary-Bootstrap-Protocol: goalctl-captain-canary-bootstrap-v1
+```
+
+旧 `worker_canary_bootstrap` v1 字段或
+`Worker-Canary-Bootstrap-Protocol:` marker 继续拒绝 CAPTAIN，不会被追认为新协议。
+FOREMAN 用 `canary-bootstrap-plan/inspect/prepare` 完成
+`IDENTITY_ONLY → PREPARE_ACTUAL_WORKTREE → deterministic branch CAS → sealed receipt`，
+然后从 CAPTAIN actual cwd 运行带 `--captain-bootstrap-*`、`--captain-thread`、
+`--captain-host` 七项 binding 的 full `canary-plan`。CANARY PASS 后从同一 cwd 执行：
+
+```bash
+gc_goalctl <frozen-goal-worktree> register-role \
+  --goal <goal-id> --task <task-id> --role CAPTAIN \
+  --thread <captain-thread> --host <captain-host> --attempt 1 \
+  --event-id <stable-registration-id> \
+  --authorizer-capability-file <foreman-capability> \
+  --captain-bootstrap-receipt <canonical-absolute-0600-json> \
+  --captain-bootstrap-receipt-sha256 <sha256> \
+  --captain-bootstrap-operation-id <same-operation-id> \
+  --captain-bootstrap-challenge <same-64hex> \
+  --captain-bootstrap-identity-plan-sha256 <same-plan-sha256> --json
+```
+
+上述 wrapper 的 process cwd 必须是 receipt 绑定的 CAPTAIN worktree。
+`START_P1` 会重新验证 receipt bytes、intent/transaction、thread/host、
+canonical cwd/gitdir/common-dir、branch 与 required HEAD；missing/异文 receipt、dirty、
+manual pre-attach、occupied branch、wrong/racing HEAD 均在事件写入前拒绝。成功路径只创建
+deterministic CAPTAIN branch 并 attach 该 worktree HEAD，不改变 tree/index、main/base
+branch 或 remote refs。
+bootstrap plan 在 Goal init 后从 sealed Goal state 机械派生 `--expected-head`：首个 P1
+使用 `goal_input_head`，后继 P1 使用最高 integration-order dependency 的
+`main_merge_sha`，没有 mechanical `p1` 配置的 legacy task 使用 `state.full_head`。
+proof 绑定 control epoch/state revision/task cycle；frozen worktree 当前 HEAD 即使相等也
+不能替代 Goal-state authority。`START_P1` 仍必须重验相同 CAPTAIN receipt 与 live identity。
+
+### DEV/REVIEW/RECEIPT dynamic worker
+
 下面的 dynamic worker bootstrap **只在 fresh Goal 的 committed manifest 显式包含**
 以下字段时启用：
 

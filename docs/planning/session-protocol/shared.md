@@ -93,6 +93,15 @@ policy 的 repo-relative path 和 SHA-256；policy bytes 必须包含这个完�
 Worker-Canary-Bootstrap-Protocol: goalctl-worker-canary-bootstrap-v1
 ```
 
+CAPTAIN detached-worktree bootstrap 使用完全独立的 opt-in：
+`captain_canary_bootstrap.protocol=goalctl-captain-canary-bootstrap-v1`，policy 必须包含
+exact `Captain-Canary-Bootstrap-Protocol: goalctl-captain-canary-bootstrap-v1` 行。
+worker-v1 字段、receipt、marker 与 persisted `worker_bootstrap` binding 均继续拒绝
+CAPTAIN。CAPTAIN prepare 输出独立 namespace receipt，registration 保存
+`captain_bootstrap` binding；`START_P1` 在写事件前重新验证 receipt/intent/HEAD
+transaction 与 live thread/host/cwd/gitdir/common-dir/branch/required HEAD。不得把该
+route 解释为允许 detached P1 或放宽既有 START_P1 条件。
+
 manifest 字段或 exact marker 缺失时，bootstrap 子命令和 receipt-bound full plan 都会
 fail-closed。旧 manifest 未 opt in 只表示 bootstrap unsupported；若 session 的 actual
 cwd 不可预知且 full plan 需要 opaque branch binding，不得借此退化到 legacy，必须使用

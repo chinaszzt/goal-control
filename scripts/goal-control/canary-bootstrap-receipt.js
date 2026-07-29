@@ -3,9 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  BOOTSTRAP_PLAN_KIND,
-} = require('./canary-bootstrap-identity-plan');
-const {
   parsePrivateJson,
 } = require('./canary-bootstrap-artifacts');
 const { assertControl } = require('./errors');
@@ -78,11 +75,11 @@ function safePathSegment(value, label) {
   return value;
 }
 
-function receiptPath(commonGitDir, receipt) {
+function receiptPath(commonGitDir, receipt, profile) {
   return path.join(
     commonGitDir,
     'goal-control',
-    'worker-canary-bootstrap-v1',
+    profile.artifactDirectory,
     'goals',
     safePathSegment(receipt.goal_id, 'receipt goal_id'),
     'tasks',
@@ -113,10 +110,10 @@ function workerFromObservation(observation, workerBranch) {
   };
 }
 
-function expectedObservation(receipt, observation) {
+function expectedObservation(receipt, observation, profile) {
   return {
     schema_version: 1,
-    kind: BOOTSTRAP_OBSERVATION_KIND,
+    kind: profile.observationKind,
     identity_plan_sha256: receipt.identity_plan_sha256,
     goal_id: receipt.goal_id,
     task_id: receipt.task_id,
@@ -164,11 +161,11 @@ function assertExpectedAuthority(options, receipt) {
   );
 }
 
-function assertReceiptShape(receipt) {
+function assertReceiptShape(receipt, profile) {
   assertControl(
     receipt
       && receipt.schema_version === 1
-      && receipt.kind === BOOTSTRAP_RECEIPT_KIND
+      && receipt.kind === profile.receiptKind
       && SHA256_RE.test(receipt.receipt_binding_sha256)
       && receipt.identity_plan
       && typeof receipt.identity_plan === 'object'
@@ -178,7 +175,7 @@ function assertReceiptShape(receipt) {
       && SHA256_RE.test(receipt.intent_sha256)
       && typeof receipt.goal_id === 'string'
       && typeof receipt.task_id === 'string'
-      && WORKER_ROLES.includes(receipt.role)
+      && profile.roles.includes(receipt.role)
       && typeof receipt.operation_id === 'string'
       && CHALLENGE_RE.test(receipt.challenge)
       && typeof receipt.thread === 'string'
@@ -231,6 +228,7 @@ function assertIdentityPlanBinding(
   options,
   receipt,
   authorizedCommonGitDir,
+  profile,
 ) {
   let currentNodeExecutable;
   try {
@@ -248,9 +246,11 @@ function assertIdentityPlanBinding(
     identity_capture: identityCapture,
     ...planCore
   } = plan;
+  const sealedRequiredStartHeadProof =
+    plan.required_start_head_proof;
   const exactPlanCore = {
     schema_version: 1,
-    kind: BOOTSTRAP_PLAN_KIND,
+    kind: profile.planKind,
     phase: 'IDENTITY_ONLY',
     controller: options.controller,
     frozen_repository: {
@@ -271,6 +271,12 @@ function assertIdentityPlanBinding(
     task_id: options.taskId,
     role: options.role,
     expected_head: receipt.worker.head,
+    ...(profile.outputPrefix === 'captain'
+      ? {
+        required_start_head_proof:
+          sealedRequiredStartHeadProof,
+      }
+      : {}),
     operation_id: options.expectedOperationId,
     challenge: options.expectedChallenge,
     worker_branch: receipt.worker_branch,
@@ -294,11 +300,32 @@ function assertIdentityPlanBinding(
     'CANARY_BOOTSTRAP_RECEIPT_BINDING_MISMATCH',
     'worker bootstrap receipt 未携带 supervisor hash-bound exact identity plan',
   );
+  if (profile.outputPrefix === 'captain') {
+    assertControl(
+      options.requiredStartHeadProof
+        && sealedRequiredStartHeadProof
+        && sealedRequiredStartHeadProof.schema_version === 1
+        && sealedRequiredStartHeadProof.goal_id === options.goalId
+        && sealedRequiredStartHeadProof.task_id === options.taskId
+        && sealedRequiredStartHeadProof.control_epoch
+          === options.requiredStartHeadProof.control_epoch
+        && sealedRequiredStartHeadProof.task_cycle
+          === options.requiredStartHeadProof.task_cycle
+        && options.requiredStartHeadProof.required_start_head
+          === receipt.worker.head
+        && sealedRequiredStartHeadProof.required_start_head
+          === receipt.worker.head
+        && hashObject(sealedRequiredStartHeadProof.source)
+          === hashObject(options.requiredStartHeadProof.source),
+      'CANARY_BOOTSTRAP_RECEIPT_BINDING_MISMATCH',
+      'captain bootstrap receipt 未绑定当前 Goal-state required start HEAD proof',
+    );
+  }
 }
 
-function validateWorkerBootstrapReceipt(options, dependencies) {
+function validateBootstrapReceipt(options, dependencies, profile) {
   assertControl(
-    WORKER_ROLES.includes(options.role),
+    profile.roles.includes(options.role),
     'CANARY_BOOTSTRAP_ROLE_INVALID',
     'worker bootstrap receipt 只适用于 worker role',
   );
@@ -317,7 +344,7 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
     'worker bootstrap receipt bytes 与 expected SHA-256 不匹配',
   );
   const receipt = record.value;
-  assertReceiptShape(receipt);
+  assertReceiptShape(receipt, profile);
   assertExpectedAuthority(options, receipt);
   safePathSegment(receipt.goal_id, 'receipt goal_id');
   safePathSegment(receipt.task_id, 'receipt task_id');
@@ -339,6 +366,7 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
       && options.receiptFile === receiptPath(
         authorizedCommonGitDir,
         receipt,
+        profile,
       ),
     'CANARY_BOOTSTRAP_RECEIPT_BINDING_MISMATCH',
     'worker bootstrap receipt 未绑定 authorized repository/common gitdir',
@@ -347,6 +375,7 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
     options,
     receipt,
     authorizedCommonGitDir,
+    profile,
   );
 
   const intentFile = path.join(
@@ -369,14 +398,18 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
     'CANARY_BOOTSTRAP_RECEIPT_INVALID',
     'worker bootstrap intent 缺 identity observation',
   );
-  const exactObservation = expectedObservation(receipt, observation);
+  const exactObservation = expectedObservation(
+    receipt,
+    observation,
+    profile,
+  );
   const finalWorker = workerFromObservation(
     exactObservation,
     receipt.worker_branch,
   );
   const exactIntentUnsigned = {
     schema_version: 1,
-    kind: BOOTSTRAP_INTENT_KIND,
+    kind: profile.intentKind,
     identity_plan_sha256: receipt.identity_plan_sha256,
     identity_observation_sha256:
       receipt.identity_observation_sha256,
@@ -412,7 +445,7 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
       artifactRoot: path.join(
         authorizedCommonGitDir,
         'goal-control',
-        'worker-canary-bootstrap-v1',
+        profile.artifactDirectory,
       ),
       branchFenceFile: path.join(
         path.dirname(options.receiptFile),
@@ -448,7 +481,7 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
 
   const exactReceiptUnsigned = {
     schema_version: 1,
-    kind: BOOTSTRAP_RECEIPT_KIND,
+    kind: profile.receiptKind,
     identity_plan: receipt.identity_plan,
     identity_plan_sha256: receipt.identity_plan_sha256,
     identity_observation_sha256:
@@ -551,5 +584,5 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
 }
 
 module.exports = {
-  validateWorkerBootstrapReceipt,
+  validateBootstrapReceipt,
 };

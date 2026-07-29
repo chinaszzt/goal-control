@@ -27,6 +27,13 @@ receipt-bound full canary plan/hash。两条输入共同构成 pre-registration 
 中间插入其它探针。完整命令与 prompt 见
 [`goal-control-run-goal.md`](goal-control-run-goal.md#动态-devreviewreceipt-的-worker-bootstrap)。
 
+CAPTAIN detached linked worktree 不复用上述 worker-v1 authority。fresh manifest 必须
+单独声明
+`captain_canary_bootstrap.protocol=goalctl-captain-canary-bootstrap-v1` 和 exact
+committed policy marker；完成 receipt-bound registration 后，`START_P1` 仍会重新核对
+同一 actual worktree identity。旧 marker、聊天 identity 或 detached execution 都不能
+替代这条 route。
+
 opt-in 必须同时具备
 `manifest.worker_canary_bootstrap.protocol=goalctl-worker-canary-bootstrap-v1`、manifest
 绑定的 policy path/hash，以及 policy 中完全相同的独立行：

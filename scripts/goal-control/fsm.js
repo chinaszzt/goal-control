@@ -173,6 +173,11 @@ function applyRegistration(state, event) {
   assertControl(typeof event.payload.capability_file === 'string' && event.payload.capability_file.length > 0, 'INVALID_REGISTRATION', 'capability file 缺失');
   assertControl(event.payload.authorized_by && typeof event.payload.authorized_by === 'object', 'REGISTRATION_AUTHORITY_REQUIRED', 'REGISTER_ROLE 缺授权者');
   if (['DEV', 'REVIEW', 'RECEIPT'].includes(role)) {
+    assertControl(
+      event.payload.captain_bootstrap === undefined,
+      'CAPTAIN_BOOTSTRAP_ROLE_INVALID',
+      'captain_bootstrap 只允许 CAPTAIN registration',
+    );
     assertControl(typeof event.payload.launch_id === 'string' && event.payload.launch_id.length > 0, 'LAUNCH_ID_REQUIRED', `${role} registration 缺 launch_id`);
     assertControl(typeof event.payload.task_nonce === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(event.payload.task_nonce), 'TASK_NONCE_REQUIRED', `${role} registration 缺控制面 task_nonce`);
     const registrationPhases = {
@@ -186,11 +191,18 @@ function applyRegistration(state, event) {
       'PREMATURE_ROLE_REGISTRATION',
       `${role} 不能在 phase=${state.phase} 提前登记`,
     );
-  } else {
+  } else if (role === 'CAPTAIN') {
     assertControl(
       event.payload.worker_bootstrap === undefined,
       'WORKER_BOOTSTRAP_ROLE_INVALID',
       'worker_bootstrap 只允许 DEV/REVIEW/RECEIPT registration',
+    );
+  } else {
+    assertControl(
+      event.payload.worker_bootstrap === undefined
+        && event.payload.captain_bootstrap === undefined,
+      'BOOTSTRAP_ROLE_INVALID',
+      'bootstrap binding 不允许当前 role registration',
     );
   }
   const attempt = Number(event.payload.attempt || 1);
@@ -283,6 +295,13 @@ function applyRegistration(state, event) {
       ? {
         worker_bootstrap: JSON.parse(
           JSON.stringify(event.payload.worker_bootstrap),
+        ),
+      }
+      : {}),
+    ...(event.payload.captain_bootstrap !== undefined
+      ? {
+        captain_bootstrap: JSON.parse(
+          JSON.stringify(event.payload.captain_bootstrap),
         ),
       }
       : {}),

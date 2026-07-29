@@ -8,11 +8,13 @@ const {
 const { hashObject } = require('./util');
 
 const BOOTSTRAP_PLAN_KIND = 'WORKER_CANARY_IDENTITY_PLAN';
+const CAPTAIN_BOOTSTRAP_PLAN_KIND =
+  'CAPTAIN_CANARY_IDENTITY_PLAN';
 
 function identityPlanCore(capture, options) {
   return {
     schema_version: 1,
-    kind: BOOTSTRAP_PLAN_KIND,
+    kind: capture.bootstrapProfile.planKind,
     phase: 'IDENTITY_ONLY',
     controller: capture.controller.provenance,
     frozen_repository: {
@@ -35,6 +37,12 @@ function identityPlanCore(capture, options) {
     task_id: capture.selectedTask.id,
     role: options.role,
     expected_head: capture.expectedHead,
+    ...(capture.requiredStartHeadProof
+      ? {
+        required_start_head_proof:
+          capture.requiredStartHeadProof,
+      }
+      : {}),
     operation_id: options.operationId,
     challenge: options.challenge,
     worker_branch: capture.workerBranch,
@@ -114,5 +122,6 @@ function identityPlanOutput(capture, options) {
 
 module.exports = {
   BOOTSTRAP_PLAN_KIND,
+  CAPTAIN_BOOTSTRAP_PLAN_KIND,
   identityPlanOutput,
 };

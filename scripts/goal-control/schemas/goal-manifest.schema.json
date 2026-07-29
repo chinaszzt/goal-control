@@ -165,6 +165,35 @@
         }
       }
     },
+    "captain_canary_bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "policy"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "goalctl-captain-canary-bootstrap-v1"
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/repoPath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
     "tasks": {
       "type": "array",
       "minItems": 1,

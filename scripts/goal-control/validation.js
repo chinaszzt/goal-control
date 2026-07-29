@@ -25,6 +25,12 @@ const WORKER_CANARY_BOOTSTRAP_PROTOCOL =
   'goalctl-worker-canary-bootstrap-v1';
 const WORKER_CANARY_BOOTSTRAP_POLICY_MARKER =
   `Worker-Canary-Bootstrap-Protocol: ${WORKER_CANARY_BOOTSTRAP_PROTOCOL}`;
+const CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL =
+  'goalctl-captain-canary-bootstrap-v1';
+const CAPTAIN_CANARY_BOOTSTRAP_POLICY_PREFIX =
+  'Captain-Canary-Bootstrap-Protocol:';
+const CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER =
+  `Captain-Canary-Bootstrap-Protocol: ${CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL}`;
 const P1_COMMIT_REF_RE = /^refs\/heads\/codex\/goal-control\/p1\/[0-9a-f]{64}\/[0-9a-f]{64}\/cycle-[1-9][0-9]*$/;
 const EVENT_PAYLOAD_KEYS = Object.freeze({
   START_P1: ['required_start_head', 'p1_worktree', 'p1_branch'],
@@ -94,7 +100,7 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'pr_contract_sha256',
   ],
   ARCHIVED: ['evidence_id'],
-  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'goal_foreman_projection', 'projected_lease_until'],
+  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'captain_bootstrap', 'goal_foreman_projection', 'projected_lease_until'],
   HEARTBEAT: ['lease_ms', 'status'],
   CONTROL_RECONCILED: ['control_event_id', 'instruction_ref'],
   ADD_HOLD: ['kind', 'hold_id', 'reason', 'evidence_id'],
@@ -513,7 +519,7 @@ function assertNoSensitiveKeys(value, label, code) {
 
 function validateManifest(manifest, manifestFile, repositoryRoot) {
   assertPlainObject(manifest, 'INVALID_MANIFEST', 'manifest');
-  assertOnlyKeys(manifest, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'tasks'], 'INVALID_MANIFEST', 'manifest');
+  assertOnlyKeys(manifest, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'captain_canary_bootstrap', 'tasks'], 'INVALID_MANIFEST', 'manifest');
   assertControl(manifest.schema_version === 1, 'UNSUPPORTED_SCHEMA', 'manifest.schema_version 必须为 1');
   const goalId = entityId(manifest.goal_id, 'goal_id', 'INVALID_MANIFEST');
   if (manifest.title !== undefined) nonEmptyString(manifest.title, 'manifest.title', 'INVALID_MANIFEST', 200);
@@ -601,6 +607,81 @@ function validateManifest(manifest, manifestFile, repositoryRoot) {
     );
     workerCanaryBootstrap = {
       protocol: WORKER_CANARY_BOOTSTRAP_PROTOCOL,
+      policy: {
+        path: policyPath,
+        sha256: computedPolicySha256,
+      },
+    };
+  }
+
+  let captainCanaryBootstrap;
+  if (manifest.captain_canary_bootstrap !== undefined) {
+    assertPlainObject(
+      manifest.captain_canary_bootstrap,
+      'INVALID_MANIFEST',
+      'manifest.captain_canary_bootstrap',
+    );
+    assertOnlyKeys(
+      manifest.captain_canary_bootstrap,
+      ['protocol', 'policy'],
+      'INVALID_MANIFEST',
+      'manifest.captain_canary_bootstrap',
+    );
+    assertControl(
+      manifest.captain_canary_bootstrap.protocol
+        === CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
+      'CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
+      `captain canary bootstrap protocol 必须是 ${CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL}`,
+    );
+    assertPlainObject(
+      manifest.captain_canary_bootstrap.policy,
+      'INVALID_MANIFEST',
+      'manifest.captain_canary_bootstrap.policy',
+    );
+    assertOnlyKeys(
+      manifest.captain_canary_bootstrap.policy,
+      ['path', 'sha256'],
+      'INVALID_MANIFEST',
+      'manifest.captain_canary_bootstrap.policy',
+    );
+    const policyPath = repoPath(
+      manifest.captain_canary_bootstrap.policy.path,
+      'manifest.captain_canary_bootstrap.policy.path',
+    );
+    const policyFile = path.resolve(repositoryRoot, policyPath);
+    realpathWithin(
+      repositoryRoot,
+      policyFile,
+      'manifest.captain_canary_bootstrap.policy.path',
+    );
+    const policyStat = fs.lstatSync(policyFile);
+    assertControl(
+      policyStat.isFile() && !policyStat.isSymbolicLink(),
+      'CAPTAIN_CANARY_BOOTSTRAP_POLICY_UNSUPPORTED',
+      'captain canary bootstrap policy 必须是仓库内普通文件',
+    );
+    const declaredPolicySha256 = normalizeHash(
+      manifest.captain_canary_bootstrap.policy.sha256,
+      'manifest.captain_canary_bootstrap.policy.sha256',
+    );
+    const computedPolicySha256 = hashFile(policyFile);
+    assertControl(
+      declaredPolicySha256 === computedPolicySha256,
+      'CAPTAIN_CANARY_BOOTSTRAP_POLICY_UNSUPPORTED',
+      'captain canary bootstrap policy hash 与文件不一致',
+    );
+    const policyLines = fs.readFileSync(policyFile, 'utf8').split(/\r?\n/);
+    const declaredMarkers = policyLines.filter(
+      (line) => line.startsWith(CAPTAIN_CANARY_BOOTSTRAP_POLICY_PREFIX),
+    );
+    assertControl(
+      declaredMarkers.length === 1
+        && declaredMarkers[0] === CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER,
+      'CAPTAIN_CANARY_BOOTSTRAP_POLICY_UNSUPPORTED',
+      `captain canary bootstrap policy 必须且只能包含一个 exact opt-in marker: ${CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER}`,
+    );
+    captainCanaryBootstrap = {
+      protocol: CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
       policy: {
         path: policyPath,
         sha256: computedPolicySha256,
@@ -961,6 +1042,9 @@ function validateManifest(manifest, manifestFile, repositoryRoot) {
     ...(workerCanaryBootstrap
       ? { worker_canary_bootstrap: workerCanaryBootstrap }
       : {}),
+    ...(captainCanaryBootstrap
+      ? { captain_canary_bootstrap: captainCanaryBootstrap }
+      : {}),
     source_manifest: path.relative(fs.realpathSync(repositoryRoot), fs.realpathSync(manifestFile)).split(path.sep).join('/'),
     tasks: orderedTasks,
   };
@@ -1168,6 +1252,18 @@ function validateEvent(event) {
     validateWorkerBootstrapBinding(
       payload.worker_bootstrap,
       'REGISTER_ROLE.payload.worker_bootstrap',
+    );
+  }
+  if (
+    event.type === 'REGISTER_ROLE'
+      && payload.captain_bootstrap !== undefined
+  ) {
+    const {
+      validateCaptainBootstrapBinding,
+    } = require('./captain-bootstrap-binding');
+    validateCaptainBootstrapBinding(
+      payload.captain_bootstrap,
+      'REGISTER_ROLE.payload.captain_bootstrap',
     );
   }
   if (
@@ -1630,6 +1726,8 @@ function validateLaunchManifest(manifest) {
 }
 
 module.exports = {
+  CAPTAIN_CANARY_BOOTSTRAP_POLICY_MARKER,
+  CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
   EVENT_PAYLOAD_REQUIRED,
   EVENT_PAYLOAD_KEYS,
   HARD_HOLDS,

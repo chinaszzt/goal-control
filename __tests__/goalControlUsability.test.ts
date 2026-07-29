@@ -630,6 +630,17 @@ describe("goalctl usability layer", () => {
       expect(registration.summary).toContain("首次 bootstrap");
       expect(registration.summary).toContain("同一 Goal authority");
       expect(registration.summary).toContain("replacement");
+      expect(registration.summary).toContain("五项 receipt binding");
+      expect(registration.summary).toContain("CAPTAIN actual worktree identity");
+      expect(registration.safety).toContain("receipt-bound actual cwd");
+      expect(registration.safety).toContain(
+        "receipt/hash/operation/challenge/identity-plan 五项 binding",
+      );
+      expect(registration.safety).toContain(
+        "thread/host/cwd/gitdir/common-dir/branch/HEAD",
+      );
+      expect(registration.safety).toContain("START_P1");
+      expect(registration.safety).toContain("live identity");
       expect(registration.safety).toContain("exact retry");
 
       const rootRecovery = help("recover-expired-foreman");

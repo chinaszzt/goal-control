@@ -8,6 +8,7 @@ const nodeRequire = createRequire(import.meta.url);
 const validation = nodeRequire(path.join(ROOT, "scripts", "goal-control", "validation.js")) as {
   EVENT_PAYLOAD_KEYS: Record<string, readonly string[]>;
   EVENT_PAYLOAD_REQUIRED: Record<string, readonly string[]>;
+  CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL: string;
   WORKER_CANARY_BOOTSTRAP_PROTOCOL: string;
   validateLaunchManifest: (value: unknown) => unknown;
 };
@@ -47,6 +48,31 @@ describe("goal-control machine contract schemas", () => {
         },
       },
     });
+  });
+
+  it("keeps captain canary bootstrap opt-in separate from worker v1", () => {
+    const schema = readJson(
+      "scripts/goal-control/schemas/goal-manifest.schema.json",
+    );
+    const captain = schema.properties.captain_canary_bootstrap;
+    expect(schema.required).not.toContain("captain_canary_bootstrap");
+    expect(captain).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["protocol", "policy"],
+      properties: {
+        protocol: {
+          const: validation.CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
+        },
+        policy: {
+          type: "object",
+          additionalProperties: false,
+          required: ["path", "sha256"],
+        },
+      },
+    });
+    expect(captain.properties.protocol.const)
+      .not.toBe(validation.WORKER_CANARY_BOOTSTRAP_PROTOCOL);
   });
 
   it("keeps the event enum and payload allowlist synchronized with runtime validation", () => {
