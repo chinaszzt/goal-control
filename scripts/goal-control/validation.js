@@ -97,7 +97,7 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'pr_contract_sha256',
   ],
   ARCHIVED: ['evidence_id'],
-  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'probe_observation', 'goal_foreman_projection', 'projected_lease_until'],
+  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'probe_observation', 'role_identity', 'goal_foreman_projection', 'projected_lease_until'],
   PROBE_OBSERVATION_REFRESHED: [
     'role',
     'attempt',
@@ -186,6 +186,7 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'incident_ref',
     'request_sha256',
     'probe_observation',
+    'role_identity',
     'root_recovery_id',
     'goal_scope',
     'goal_scope_sha256',
@@ -1299,6 +1300,66 @@ function validateEvent(event) {
       payload.worker_bootstrap,
       'REGISTER_ROLE.payload.worker_bootstrap',
     );
+  }
+  if (
+    ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN'].includes(event.type)
+      && payload.role_identity !== undefined
+  ) {
+    assertPlainObject(
+      payload.role_identity,
+      'INVALID_EVENT',
+      'REGISTER_ROLE.payload.role_identity',
+    );
+    assertOnlyKeys(
+      payload.role_identity,
+      [
+        'protocol',
+        'operation_id',
+        'intent_sha256',
+        'session_id',
+        'thread_id',
+        'host_id',
+        'attempt',
+        'launch_id',
+        'identity_observation_receipt_sha256',
+      ],
+      'INVALID_EVENT',
+      'REGISTER_ROLE.payload.role_identity',
+    );
+    assertControl(
+      payload.role_identity.protocol
+        === 'goalctl-role-identity-intent-v1'
+        && /^sha256:[0-9a-f]{64}$/.test(
+          payload.role_identity.intent_sha256 || '',
+        )
+        && /^sha256:[0-9a-f]{64}$/.test(
+          payload.role_identity
+            .identity_observation_receipt_sha256 || '',
+        )
+        && Number.isSafeInteger(payload.role_identity.attempt)
+        && payload.role_identity.attempt > 0,
+      'INVALID_EVENT',
+      'REGISTER_ROLE.payload.role_identity binding 非法',
+    );
+    for (const [value, label] of [
+      [payload.role_identity.operation_id, 'operation_id'],
+      [payload.role_identity.session_id, 'session_id'],
+      [payload.role_identity.thread_id, 'thread_id'],
+      [payload.role_identity.host_id, 'host_id'],
+    ]) {
+      entityId(
+        value,
+        `REGISTER_ROLE.payload.role_identity.${label}`,
+        'INVALID_EVENT',
+      );
+    }
+    if (payload.role_identity.launch_id !== null) {
+      entityId(
+        payload.role_identity.launch_id,
+        'REGISTER_ROLE.payload.role_identity.launch_id',
+        'INVALID_EVENT',
+      );
+    }
   }
   if (
     [

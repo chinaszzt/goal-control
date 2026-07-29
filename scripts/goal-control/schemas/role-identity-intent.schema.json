@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://goal-control.local/schemas/role-identity-intent.schema.json",
+  "title": "Controller-derived durable role identity intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "operation_id",
+    "goal_id",
+    "task_id",
+    "role",
+    "thread_id",
+    "host_id",
+    "attempt",
+    "session_id",
+    "launch_id",
+    "state_revision",
+    "control_epoch",
+    "packet",
+    "base_head",
+    "full_head",
+    "task_cycle",
+    "identity_observation",
+    "issuer_authority",
+    "created_at",
+    "intent_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "ROLE_IDENTITY_INTENT" },
+    "operation_id": { "$ref": "#/$defs/safeId" },
+    "goal_id": { "$ref": "#/$defs/safeId" },
+    "task_id": { "$ref": "#/$defs/safeId" },
+    "role": { "$ref": "#/$defs/role" },
+    "thread_id": { "$ref": "#/$defs/actualThreadId" },
+    "host_id": { "$ref": "#/$defs/actualHostId" },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "session_id": { "$ref": "#/$defs/safeId" },
+    "launch_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/safeId" },
+        { "type": "null" }
+      ]
+    },
+    "state_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "control_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "sha256"],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "base_head": { "$ref": "#/$defs/fullSha" },
+    "full_head": { "$ref": "#/$defs/fullSha" },
+    "task_cycle": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "identity_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_sha256",
+        "receipt_file_identity_sha256",
+        "record_sha256",
+        "attestation_key_id",
+        "observed_at",
+        "expires_at",
+        "worker_bootstrap_binding_sha256"
+      ],
+      "properties": {
+        "receipt_sha256": { "$ref": "#/$defs/sha256" },
+        "receipt_file_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "record_sha256": { "$ref": "#/$defs/sha256" },
+        "attestation_key_id": { "$ref": "#/$defs/safeId" },
+        "observed_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "worker_bootstrap_binding_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "issuer_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "capability_sha256",
+        "source_task_id",
+        "role",
+        "thread_id",
+        "host_id",
+        "attempt",
+        "session_id",
+        "lease_until",
+        "registration_event_id",
+        "bootstrap_init_receipt_sha256",
+        "recovery_scope_sha256"
+      ],
+      "properties": {
+        "kind": {
+          "enum": ["BOOTSTRAP", "SESSION", "CURRENT_SESSION", "GOAL_RECOVERY"]
+        },
+        "capability_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_task_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/safeId" },
+            { "type": "null" }
+          ]
+        },
+        "role": {
+          "oneOf": [
+            { "$ref": "#/$defs/role" },
+            { "type": "null" }
+          ]
+        },
+        "thread_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/actualThreadId" },
+            { "type": "null" }
+          ]
+        },
+        "host_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/actualHostId" },
+            { "type": "null" }
+          ]
+        },
+        "attempt": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            { "type": "null" }
+          ]
+        },
+        "session_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/safeId" },
+            { "type": "null" }
+          ]
+        },
+        "lease_until": {
+          "oneOf": [
+            { "$ref": "#/$defs/canonicalTimestamp" },
+            { "type": "null" }
+          ]
+        },
+        "registration_event_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/safeId" },
+            { "type": "null" }
+          ]
+        },
+        "bootstrap_init_receipt_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "recovery_scope_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "kind": { "const": "BOOTSTRAP" },
+            "source_task_id": { "type": "null" },
+            "role": { "type": "null" },
+            "thread_id": { "type": "null" },
+            "host_id": { "type": "null" },
+            "attempt": { "type": "null" },
+            "session_id": { "type": "null" },
+            "lease_until": { "type": "null" },
+            "registration_event_id": { "type": "null" },
+            "bootstrap_init_receipt_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "recovery_scope_sha256": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "enum": ["SESSION", "CURRENT_SESSION"] },
+            "source_task_id": { "$ref": "#/$defs/safeId" },
+            "role": { "$ref": "#/$defs/role" },
+            "thread_id": { "$ref": "#/$defs/actualThreadId" },
+            "host_id": { "$ref": "#/$defs/actualHostId" },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "session_id": { "$ref": "#/$defs/safeId" },
+            "lease_until": { "$ref": "#/$defs/canonicalTimestamp" },
+            "registration_event_id": { "$ref": "#/$defs/safeId" },
+            "bootstrap_init_receipt_sha256": { "type": "null" },
+            "recovery_scope_sha256": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "GOAL_RECOVERY" },
+            "source_task_id": { "$ref": "#/$defs/safeId" },
+            "role": { "const": "FOREMAN" },
+            "thread_id": { "$ref": "#/$defs/actualThreadId" },
+            "host_id": { "$ref": "#/$defs/actualHostId" },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "session_id": { "$ref": "#/$defs/safeId" },
+            "lease_until": { "$ref": "#/$defs/canonicalTimestamp" },
+            "registration_event_id": { "$ref": "#/$defs/safeId" },
+            "bootstrap_init_receipt_sha256": { "type": "null" },
+            "recovery_scope_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
+    "created_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "intent_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "allOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        {
+          "not": { "pattern": "^[A-Za-z0-9_-]{43}$" }
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+          }
+        }
+      ]
+    },
+    "actualThreadId": {
+      "allOf": [
+        { "$ref": "#/$defs/safeId" },
+        {
+          "not": {
+            "pattern": "^[lL][oO][cC][aA][lL]$|^(?:[fF][oO][rR][eE][mM][aA][nN]|[cC][aA][pP][tT][aA][iI][nN]|[dD][eE][vV]|[rR][eE][vV][iI][eE][wW]|[rR][eE][cC][eE][iI][pP][tT])(?:-1|-[aA]-[1-9][0-9]*)$"
+          }
+        }
+      ]
+    },
+    "actualHostId": {
+      "allOf": [
+        { "$ref": "#/$defs/safeId" },
+        {
+          "not": { "pattern": "^[lL][oO][cC][aA][lL]$" }
+        }
+      ]
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "role": {
+      "enum": ["FOREMAN", "CAPTAIN", "DEV", "REVIEW", "RECEIPT"]
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

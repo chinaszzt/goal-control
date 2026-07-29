@@ -208,13 +208,34 @@ hash；bootstrap 尚在时也验证其 bytes/hash，已消费时则要求 sealed
 且 fresh Goal 的 preclaim/init 已闭合后，才登记该 task 的 FOREMAN；登记成功后再发送
 `ACTIVE`：
 
+若 manifest 启用 `probe_observation_receipts`，host adapter 必须先在 controller
+control-root 之外生成 manifest-key-signed、private `0600` actual identity observation。
+controller 不接受 caller 写 `--thread/--host/--attempt` 来准备 challenge；同一个
+authenticated upstream transaction 验签 observation、从 current lineage 派生 attempt
+并原子 seal durable identity intent/challenge：
+
+```bash
+gc_goalctl <controlled-worktree> prepare-probe-observation-challenge \
+  --goal <goal-id> --task <task-id> --role FOREMAN \
+  --event-id <stable-first-foreman-registration-id> \
+  --canary-plan-sha256 <sha256> \
+  --issuer-capability-file <bootstrap-capability-file> \
+  --identity-receipt <absolute-private-host-signed-observation.json> \
+  --identity-receipt-sha256 <sha256> --json
+```
+
+只有成功后，credentialless `status/actions` 才会零写投影
+`role_identity_intent`。registration 的 thread/host/attempt/session/launch 必须逐项等于
+该 intent，并携带同 event 的 sealed probe receipt/plan/challenge；pending/伪造/过期
+observation 不产生投影。这里没有另一个 `seal/project/register identity` consumer 写步骤。
+
 ```bash
 gc_goalctl <controlled-worktree> register-role \
   --goal <goal-id> \
   --task <task-id> \
   --role FOREMAN \
   --thread <foreman-thread-id> \
-  --host local \
+  --host <actual-host-id> \
   --attempt 1 \
   --event-id <stable-first-foreman-registration-id> \
   --bootstrap-capability-file <bootstrap-capability-file> \

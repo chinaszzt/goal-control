@@ -79,8 +79,26 @@ known limitation 只接受 `id` 和封闭的 exact 404 match 六字段；额外�
 ## Gate 与 replay
 
 只有 aggregate `PASS` 或 policy-finalized `KNOWN_LIMITATION` 才能落盘
-`REGISTER_ROLE`。先用
-`prepare-probe-observation-challenge` 创建 controller-held durable challenge。
+`REGISTER_ROLE`。先由 host/platform signer 在 controller 之外观测 actual
+thread/host/session/launch/HEAD，生成 private `0600` 的
+`GOALCTL_HOST_ROLE_IDENTITY_OBSERVATION_V1` 并用 manifest 冻结的 Ed25519 authority
+签名。随后用 `prepare-probe-observation-challenge` 提交 observation 的 absolute path
+和 content SHA。这个命令不接受 thread/host/attempt argv：它在同一个 locked upstream
+canary acceptance transaction 中先验证 pre-existing observation，再从当前 durable
+controller state 派生 attempt、revision、epoch、packet、task cycle 和 HEAD，最后原子发布
+sanitized `ROLE_IDENTITY_INTENT` 与 controller-held challenge。
+
+签名 observation 仍无权自报 attempt，也不能覆盖 active session。首次
+FOREMAN 只能由未消费 bootstrap 签发，CAPTAIN/worker 只能由当前 controller authorizer
+签发，Goal-wide later-task FOREMAN 必须复用 exact current Goal identity，terminal、
+`ROLE_LOST` recovery 和 `REVIEW_REWORK` successor 的 higher attempt 只由 controller
+lineage 推导。claim-only、伪造、过期、cross Goal/task/role/HEAD、synthetic alias 或含
+credential-shaped leaf 的 observation 在 generation 前拒绝；不会出现 public pending
+intent。public `status`/`actions` 只读投影已经验签且仍绑定 current state 的 intent，
+重复读取不写 generation/tree；credentialless consumer 和 `REGISTER_ROLE` 都没有另一个
+seal/project mutation prerequisite。后续 registration 只能精确消费 intent 的 actual
+identity/attempt/session/launch，不能由 caller 改写。
+
 accepted event 指向 controller 私有目录中 exact `0600` 的 plan/receipt 副本，并保存
 ordered results seal、identity、challenge、stable ID、time 和 hash；caller 文件之后
 移动或消失也不影响审计。launch、verdict、preflight/Fast/Full/AC mechanical
@@ -95,8 +113,10 @@ registration event ID 决定 observation stable ID：
 canary-observation-<registration-event-id>
 ```
 
-response loss 只能使用相同 event ID、receipt path/hash、plan path/hash、challenge、
-thread/host/attempt 和 authority exact retry。相同 stable ID 的任何异文请求冲突。
+challenge response loss 只能使用相同 event ID、identity receipt path/hash、plan hash
+和 issuer authority exact retry；registration response loss 只能使用相同 event ID、
+receipt path/hash、plan path/hash、challenge 和 sealed identity exact retry。相同
+stable ID 的任何异文请求冲突。
 同一 receipt 不能改绑到另一 event、thread、host、attempt、Goal/task/role、旧 plan、
 旧 challenge 或不同 target fingerprint。`recover-expired-foreman` 也是 activation
 path，必须用 recovery root event ID 准备并提交 fresh FOREMAN observation；durable

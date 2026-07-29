@@ -25,7 +25,7 @@ const CONTROLLER_EVIDENCE_ID_RE =
   /^controller-evidence-v1-[0-9a-f]{64}$/;
 const CAPABILITY_VALUE_RE = /^[A-Za-z0-9_-]{43}$/;
 const GITHUB_TOKEN_VALUE_RE =
-  /(?:^|[^A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})(?:$|[^A-Za-z0-9_])/i;
+  /(?:^|[^A-Za-z0-9_])(?:gh[pousr][_-][A-Za-z0-9_-]{8,}|github[_-]pat[_-][A-Za-z0-9_-]{8,}|xox[baprs][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])/i;
 const DISPOSITIONS = Object.freeze([
   'PASS',
   'PROVISIONAL_KNOWN_LIMITATION',
@@ -1432,6 +1432,7 @@ module.exports = {
   PROTOCOL,
   RECEIPT_KIND,
   aggregateProbeResults,
+  assertNoSensitiveStringLeaves,
   assertLivePassBinding,
   assertRequiredLiveBinding,
   controllerEvidenceReference,

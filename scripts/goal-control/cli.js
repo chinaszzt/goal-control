@@ -156,18 +156,45 @@ function goalCommand(
     return { value: initializeGoal(cwd, requireArg(args, 'manifest')), exitCode: 0 };
   }
   if (command === 'prepare-probe-observation-challenge') {
+    const allowed = new Set([
+      '_',
+      'json',
+      'goal',
+      'task',
+      'role',
+      'event_id',
+      'canary_plan_sha256',
+      'issuer_capability_file',
+      'identity_receipt',
+      'identity_receipt_sha256',
+    ]);
+    const unknown = Object.keys(args).filter((key) => !allowed.has(key));
+    assertControl(
+      args._.length === 1 && unknown.length === 0,
+      'INVALID_ARGUMENT',
+      `prepare-probe-observation-challenge 拒绝 caller identity/未知参数${
+        unknown.length > 0
+          ? `: ${unknown.map((key) => `--${key.replace(/_/g, '-')}`).join(', ')}`
+          : ''
+      }`,
+    );
     return {
       value: prepareProbeObservationChallenge(cwd, {
         goalId: requireArg(args, 'goal'),
         taskId: requireArg(args, 'task'),
         role: validateRole(requireArg(args, 'role')),
-        threadId: requireArg(args, 'thread'),
-        hostId: args.host || 'local',
-        attempt: optionalInteger(args.attempt, 'attempt', 1),
         eventId: requireArg(args, 'event_id'),
         planSha256: requireArg(args, 'canary_plan_sha256'),
         issuerCapabilityFile:
           requireArg(args, 'issuer_capability_file'),
+        identityReceipt: requireArg(
+          args,
+          'identity_receipt',
+        ),
+        identityReceiptSha256: requireArg(
+          args,
+          'identity_receipt_sha256',
+        ),
       }),
       exitCode: 0,
     };
@@ -632,9 +659,20 @@ function goalCommand(
     return { value: nextTasks(cwd, requireArg(args, 'goal')), exitCode: 0 };
   }
   if (command === 'actions') {
-    const role = validateRole(requireArg(args, 'role'));
+    const role = args.role ? validateRole(args.role) : null;
+    assertControl(
+      role || !args.thread,
+      'INVALID_ARGUMENT',
+      'credentialless actions 不能单独指定 --thread',
+    );
     return {
-      value: actionsForTask(cwd, requireArg(args, 'goal'), requireArg(args, 'task'), role, requireArg(args, 'thread')),
+      value: actionsForTask(
+        cwd,
+        requireArg(args, 'goal'),
+        requireArg(args, 'task'),
+        role,
+        role ? requireArg(args, 'thread') : null,
+      ),
       exitCode: 0,
     };
   }

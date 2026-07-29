@@ -175,6 +175,20 @@ function applyRegistration(state, event) {
   assertControl(typeof event.payload.capability_sha256 === 'string' && /^[0-9a-f]{64}$/.test(event.payload.capability_sha256), 'INVALID_REGISTRATION', 'capability hash 缺失');
   assertControl(typeof event.payload.capability_file === 'string' && event.payload.capability_file.length > 0, 'INVALID_REGISTRATION', 'capability file 缺失');
   assertControl(event.payload.authorized_by && typeof event.payload.authorized_by === 'object', 'REGISTRATION_AUTHORITY_REQUIRED', 'REGISTER_ROLE 缺授权者');
+  if (state.probe_observation_required) {
+    const identity = event.payload.role_identity;
+    assertControl(
+      identity
+        && identity.protocol === 'goalctl-role-identity-intent-v1'
+        && identity.operation_id === event.event_id
+        && identity.thread_id === event.payload.thread_id
+        && identity.host_id === hostId
+        && identity.attempt === Number(event.payload.attempt || 1)
+        && identity.launch_id === (event.payload.launch_id || null),
+      'ROLE_IDENTITY_INTENT_MISMATCH',
+      'probe-enabled REGISTER_ROLE 必须绑定 exact upstream role identity intent',
+    );
+  }
   if (['DEV', 'REVIEW', 'RECEIPT'].includes(role)) {
     assertControl(typeof event.payload.launch_id === 'string' && event.payload.launch_id.length > 0, 'LAUNCH_ID_REQUIRED', `${role} registration 缺 launch_id`);
     assertControl(typeof event.payload.task_nonce === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(event.payload.task_nonce), 'TASK_NONCE_REQUIRED', `${role} registration 缺控制面 task_nonce`);
@@ -293,6 +307,13 @@ function applyRegistration(state, event) {
       ? {
         probe_observation: JSON.parse(
           JSON.stringify(event.payload.probe_observation),
+        ),
+      }
+      : {}),
+    ...(event.payload.role_identity !== undefined
+      ? {
+        role_identity: JSON.parse(
+          JSON.stringify(event.payload.role_identity),
         ),
       }
       : {}),
@@ -770,6 +791,20 @@ function applyExpiredForemanRecovery(state, event) {
     ? previous.attempt
     : Number(event.payload.source_foreman.attempt);
   assertControl(attempt === incumbentAttempt + 1, 'STALE_ROLE_ATTEMPT', `FOREMAN attempt 必须恰好从 ${incumbentAttempt} 增至 ${incumbentAttempt + 1}`);
+  if (state.probe_observation_required) {
+    const identity = event.payload.role_identity;
+    assertControl(
+      identity
+        && identity.protocol === 'goalctl-role-identity-intent-v1'
+        && identity.operation_id === event.payload.root_recovery_id
+        && identity.thread_id === event.actor.thread_id
+        && identity.host_id === event.actor.host_id
+        && identity.attempt === attempt
+        && identity.launch_id === null,
+      'ROLE_IDENTITY_INTENT_MISMATCH',
+      'probe-enabled FOREMAN recovery 必须绑定 exact upstream role identity intent',
+    );
+  }
   assertControl(!previous || event.actor.thread_id !== previous.thread_id, 'ROLE_IDENTITY_REUSE', 'successor FOREMAN 必须使用全新的 thread identity');
   const allSessions = [
     ...Object.values(state.sessions || {}),
@@ -829,6 +864,13 @@ function applyExpiredForemanRecovery(state, event) {
       ? {
         probe_observation: JSON.parse(
           JSON.stringify(event.payload.probe_observation),
+        ),
+      }
+      : {}),
+    ...(event.payload.role_identity !== undefined
+      ? {
+        role_identity: JSON.parse(
+          JSON.stringify(event.payload.role_identity),
         ),
       }
       : {}),

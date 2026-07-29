@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://goal-control.local/schemas/role-identity-observation.schema.json",
+  "title": "Host-attested role identity observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "operation_id",
+    "goal_id",
+    "task_id",
+    "role",
+    "thread_id",
+    "host_id",
+    "session_id",
+    "launch_id",
+    "repository_head",
+    "worker_bootstrap_binding_sha256",
+    "observed_at",
+    "expires_at",
+    "attestation",
+    "record_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": {
+      "const": "GOALCTL_HOST_ROLE_IDENTITY_OBSERVATION_V1"
+    },
+    "operation_id": { "$ref": "#/$defs/safeId" },
+    "goal_id": { "$ref": "#/$defs/safeId" },
+    "task_id": { "$ref": "#/$defs/safeId" },
+    "role": { "$ref": "#/$defs/role" },
+    "thread_id": { "$ref": "#/$defs/actualThreadId" },
+    "host_id": { "$ref": "#/$defs/actualHostId" },
+    "session_id": { "$ref": "#/$defs/safeId" },
+    "launch_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/safeId" },
+        { "type": "null" }
+      ]
+    },
+    "repository_head": { "$ref": "#/$defs/fullSha" },
+    "worker_bootstrap_binding_sha256": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha256" },
+        { "type": "null" }
+      ]
+    },
+    "observed_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "public_key_sha256",
+        "signature_base64url"
+      ],
+      "properties": {
+        "algorithm": { "const": "ED25519" },
+        "key_id": { "$ref": "#/$defs/safeId" },
+        "public_key_sha256": { "$ref": "#/$defs/sha256" },
+        "signature_base64url": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "allOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{86}$"
+            },
+            {
+              "not": {
+                "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "record_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "allOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        {
+          "not": { "pattern": "^[A-Za-z0-9_-]{43}$" }
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9_])(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9_])"
+          }
+        }
+      ]
+    },
+    "actualThreadId": {
+      "allOf": [
+        { "$ref": "#/$defs/safeId" },
+        {
+          "not": {
+            "pattern": "^[lL][oO][cC][aA][lL]$|^(?:[fF][oO][rR][eE][mM][aA][nN]|[cC][aA][pP][tT][aA][iI][nN]|[dD][eE][vV]|[rR][eE][vV][iI][eE][wW]|[rR][eE][cC][eE][iI][pP][tT])(?:-1|-[aA]-[1-9][0-9]*)$"
+          }
+        }
+      ]
+    },
+    "actualHostId": {
+      "allOf": [
+        { "$ref": "#/$defs/safeId" },
+        {
+          "not": { "pattern": "^[lL][oO][cC][aA][lL]$" }
+        }
+      ]
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "role": {
+      "enum": ["FOREMAN", "CAPTAIN", "DEV", "REVIEW", "RECEIPT"]
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
