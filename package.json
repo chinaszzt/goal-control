@@ -20,8 +20,10 @@
     "test:binding": "TZ=Asia/Shanghai NODE_OPTIONS=--experimental-vm-modules jest --runInBand __tests__/goalControlPreflight.test.ts -t \"opt-in worker registration|sibling checkout|receipt binding\"",
     "test:l1": "TZ=Asia/Shanghai NODE_OPTIONS=--experimental-vm-modules jest --runInBand __tests__/goalControlAtomicCrashBoundary.test.ts __tests__/goalControlConcurrency.test.ts __tests__/goalControlWorktreeBootstrapFilesHeadTransaction.test.ts __tests__/goalControlWorktreeBootstrapHeadTransaction.test.ts",
     "test:lab": "node lab/run-scenario.js",
-    "test:full": "TZ=Asia/Shanghai NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
-    "check": "pnpm verify:provenance && pnpm test:fast && pnpm test:binding && pnpm test:lab",
+    "test:full": "node scripts/run-full-suite.js",
+    "test:full:shard": "node scripts/run-full-suite.js",
+    "verify:full-suite-groups": "node scripts/run-full-suite.js --validate",
+    "check": "pnpm verify:provenance && pnpm verify:full-suite-groups && pnpm test:fast && pnpm test:binding && pnpm test:lab",
     "provenance:create": "node scripts/create-extraction-provenance.js",
     "verify:provenance": "node scripts/verify-extraction-provenance.js",
     "verify:source": "node scripts/verify-source-equivalence.js"

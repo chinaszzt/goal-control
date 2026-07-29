@@ -34,10 +34,23 @@ jobs:
       - run: pnpm check
 
   full:
-    name: Full compatibility
+    name: Full compatibility (${{ matrix.group }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - core-fsm
+          - git-worktree
+          - recovery-rotation
+          - source-handoff
+          - github-resource
+          - usability-security
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.0
@@ -46,4 +59,30 @@ jobs:
           node-version: "22.19.0"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:full
+      - name: Validate checked-in groups and non-increasing budget
+        env:
+          FULL_SUITE_REQUIRE_BUDGET_BASE: "1"
+          FULL_SUITE_EVENT_NAME: ${{ github.event_name }}
+          FULL_SUITE_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          FULL_SUITE_PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: pnpm verify:full-suite-groups
+      - name: Run full compatibility group
+        env:
+          FULL_SUITE_ARTIFACT_DIR: artifacts/full-suite
+        run: pnpm test:full:shard -- --group "${{ matrix.group }}"
+      - name: Upload JUnit and timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-${{ matrix.group }}-results
+          path: |
+            artifacts/full-suite/${{ matrix.group }}/junit.xml
+            artifacts/full-suite/${{ matrix.group }}/timings.json
+          if-no-files-found: error
+      - name: Upload redacted failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-${{ matrix.group }}-diagnostics
+          path: artifacts/full-suite/${{ matrix.group }}/*.failure-diagnostic.json
+          if-no-files-found: error
