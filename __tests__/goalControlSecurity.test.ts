@@ -155,6 +155,13 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 }
 
+function externalProductionRepository(): string {
+  const dependencyParent = path.dirname(
+    realpathSync(path.join(ROOT, "node_modules")),
+  );
+  return git(dependencyParent, "rev-parse", "--show-toplevel");
+}
+
 function sha256(body: string | Buffer): string {
   return `sha256:${createHash("sha256").update(body).digest("hex")}`;
 }
@@ -1047,10 +1054,11 @@ describe("goal control capability chain", () => {
 
   it("rejects GOAL_CONTROL_TEST_MODE when the repository itself is not isolated under the system temp directory", () => {
     const controlDir = path.join(fixture.sandbox, "real-repo-control");
+    const productionRepository = externalProductionRepository();
     mkdirSync(controlDir, { recursive: true });
     try {
       execFileSync("node", [GOALCTL, "status", "--goal", "demo", "--json"], {
-        cwd: ROOT,
+        cwd: productionRepository,
         encoding: "utf8",
         stdio: "pipe",
         env: { ...process.env, GOAL_CONTROL_DIR: controlDir, GOAL_CONTROL_TEST_MODE: "1" },
@@ -1063,12 +1071,9 @@ describe("goal control capability chain", () => {
   });
 
   it("does not trust caller TMPDIR when authorizing test-only overrides", () => {
-    const fakeTempRoot = mkdtempSync(path.join(path.dirname(ROOT), "goalctl-tmpdir-poison-"));
-    const fakeRepository = path.join(fakeTempRoot, "repo");
-    const fakeControl = path.join(fakeTempRoot, "control");
-    mkdirSync(fakeRepository, { recursive: true });
-    mkdirSync(fakeControl, { recursive: true });
-    git(fakeRepository, "init", "-q", "-b", "main");
+    const fakeTempRoot = externalProductionRepository();
+    const fakeRepository = fakeTempRoot;
+    const fakeControl = path.join(fakeTempRoot, ".git");
     try {
       execFileSync("node", [GOALCTL, "status", "--goal", "not-initialized", "--json"], {
         cwd: fakeRepository,
@@ -1085,8 +1090,6 @@ describe("goal control capability chain", () => {
     } catch (error: unknown) {
       const failure = error as { stderr?: string };
       expect(failure.stderr).toContain("TEST_MODE_FORBIDDEN");
-    } finally {
-      rmSync(fakeTempRoot, { recursive: true, force: true });
     }
   });
 

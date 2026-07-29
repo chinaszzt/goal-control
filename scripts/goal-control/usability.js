@@ -91,6 +91,7 @@ const GOAL_COMMANDS = Object.freeze([
   ['adopt-store-protocol ...', '审计迁移现存非空 v1 control root 到当前 decoder/lock protocol'],
   ['rotate-store-protocol ...', '在 exact predecessor seal 与双 decoder 重放验证后轮换已 seal control root'],
   ['register-role ...', '登记角色；后续 task 的 FOREMAN 只投影同一 Goal authority'],
+  ['refresh-probe-observation ...', '在现有 binding 过期前以 CAS 原子续订 sealed probe observation receipt'],
   ['recover-expired-foreman ...', '原子批量替换过期死锁中的 Goal-wide FOREMAN projections'],
   ['status --goal <id>', '读取机器状态投影'],
   ['next --goal <id>', '计算当前可并行启动的 task 批次'],
@@ -149,7 +150,7 @@ const GOAL_HELP = Object.freeze({
   'canary-plan': {
     usage: '<controller-root>/scripts/goal-control/canary-plan-launch.sh [--node-executable <canonical-absolute-path>] --repository-worktree <frozen-goal-worktree> --manifest <repo-relative-json> --role FOREMAN|CAPTAIN|DEV|REVIEW|RECEIPT [--task <id>] [--browser-canary-receipt <absolute-0600-json>] [--worker-bootstrap-receipt <absolute-0600-json> --worker-bootstrap-receipt-sha256 <sha256> --worker-bootstrap-operation-id <id> --worker-bootstrap-challenge <64hex> --worker-bootstrap-identity-plan-sha256 <sha256> --worker-thread <id> --worker-host <id>] [--json]',
     summary: '以 absolute clean committed controller 只读验证 frozen Goal worktree 中的 manifest、全部 packet/protocol/P1 authority/canary policy，再按 role/task 生成 hash-bound 的最小 canary plan、GitHub App repository-metadata 语义合同、probe 顺序和聚合规则。',
-    safety: '必须用 canary-plan-launch.sh 清空 inherited environment；setup-node/fnm/asdf 等非固定安装位置必须由 supervisor 把其已信任运行时的 canonical realpath 作为 argv-only --node-executable TCB 传入，worker 禁止自选，且禁止从 PATH/环境变量发现。launcher 用固定 OS 工具独立验证无控制字符、ordinary single-link/mode；自动发现的固定候选还要求当前 uid/root owner，显式 override 的 owner/provenance 则属于 supervisor 外部批准的 TCB，以兼容 actions/setup-node 的异 uid runner toolcache。launcher 本身不认证调用者，worker 只能执行冻结的 exact argv。随后在 env-i 下做 Node >=22.19 兼容性检查；兼容性检查不是 executable provenance 证明，恶意 binary/同 UID pathname replacement 明确在本地边界之外。plan replay 也只能原样执行 hash-bound env -i shell_command。controller root/entrypoint 与 frozen Goal repository_worktree/HEAD 是两组独立 canonical identity，不能靠 cwd 或一个 HEAD 代替另一个；完整 control closure 必须逐 HEAD blob 匹配，assume-unchanged/skip-worktree 一律拒绝。dynamic worker 额外要求 receipt path/SHA、原始 operation/challenge/identity-plan SHA、actual thread/host 七项原子 binding；operation/challenge/identity-plan SHA 必须来自 supervisor 创建 worker 前持久化的值，thread/host 只认平台实际 identity，禁止 worker 从 receipt 或聊天自选/重建。canary 必须从 receipt 绑定的 actual process cwd 生成和重放；父/兄弟 cwd 或 detached/dirty/identity 漂移立即拒绝。CAPTAIN/DEV/REVIEW/RECEIPT 必须指定已知 task；FOREMAN 禁止指定 task。只有适用于该角色的 BROWSER_PROFILE/WINDOW 才要求 Browser；REQUIRED 必须绑定 browser-canary-launch.sh 产生的 private receipt、Goal/role/task、15 分钟 TTL、held fd/parent、minimal server environment、canonical server/controller、PID/start/executable/exact argv/cwd、全局唯一 OS listener owner、exact no-redirect endpoint/page probe 与 strict 127.0.0.1 contract，NOT_REQUIRED 时传 receipt 反而拒绝。CAPTAIN、PORT/EXECUTABLE 或空 requirements 不推出 Browser。required_probes 必须按数组顺序执行，Browser（若 REQUIRED）先于 GitHub App，App repository metadata read 固定最后；commit/PR/file/issue read 不可替代。只有 manifest-bound committed policy 的 exact versioned marker 可把 exact 404 先记 PROVISIONAL，并在全部同-session 补偿 PASS 后最终聚合。当前 plan 不消费结构化 observation receipt，不能把自由文本回执宣称为机械执行证明。结束时只能用 launch.sh stop 安全收口，禁止 raw PID kill。',
+    safety: '必须用 canary-plan-launch.sh 清空 inherited environment；setup-node/fnm/asdf 等非固定安装位置必须由 supervisor 把其已信任运行时的 canonical realpath 作为 argv-only --node-executable TCB 传入，worker 禁止自选，且禁止从 PATH/环境变量发现。launcher 用固定 OS 工具独立验证无控制字符、ordinary single-link/mode；自动发现的固定候选还要求当前 uid/root owner，显式 override 的 owner/provenance 则属于 supervisor 外部批准的 TCB，以兼容 actions/setup-node 的异 uid runner toolcache。launcher 本身不认证调用者，worker 只能执行冻结的 exact argv。随后在 env-i 下做 Node >=22.19 兼容性检查；兼容性检查不是 executable provenance 证明，恶意 binary/同 UID pathname replacement 明确在本地边界之外。plan replay 也只能原样执行 hash-bound env -i shell_command。controller root/entrypoint 与 frozen Goal repository_worktree/HEAD 是两组独立 canonical identity，不能靠 cwd 或一个 HEAD 代替另一个；完整 control closure 必须逐 HEAD blob 匹配，assume-unchanged/skip-worktree 一律拒绝。dynamic worker 额外要求 receipt path/SHA、原始 operation/challenge/identity-plan SHA、actual thread/host 七项原子 binding；operation/challenge/identity-plan SHA 必须来自 supervisor 创建 worker 前持久化的值，thread/host 只认平台实际 identity，禁止 worker 从 receipt 或聊天自选/重建。canary 必须从 receipt 绑定的 actual process cwd 生成和重放；父/兄弟 cwd 或 detached/dirty/identity 漂移立即拒绝。CAPTAIN/DEV/REVIEW/RECEIPT 必须指定已知 task；FOREMAN 禁止指定 task。只有适用于该角色的 BROWSER_PROFILE/WINDOW 才要求 Browser；REQUIRED 必须绑定 browser-canary-launch.sh 产生的 private receipt、Goal/role/task、15 分钟 TTL、held fd/parent、minimal server environment、canonical server/controller、PID/start/executable/exact argv/cwd、全局唯一 OS listener owner、exact no-redirect endpoint/page probe 与 strict 127.0.0.1 contract，NOT_REQUIRED 时传 receipt 反而拒绝。CAPTAIN、PORT/EXECUTABLE 或空 requirements 不推出 Browser。required_probes 必须按数组顺序执行，Browser（若 REQUIRED）先于 GitHub App，App repository metadata read 固定最后；commit/PR/file/issue read 不可替代。只有 manifest-bound committed policy 的 exact versioned marker 可把 exact 404 先记 PROVISIONAL，并在全部同-session 补偿 PASS 后最终聚合。启用 probe_observation_receipts 时，host adapter 必须把 ordered results 写成 private sealed receipt；core 只验证 schema/hash/identity/TTL/aggregate，PASS 前不登记、不 launch、也不开 FULL。自由文本回执永远不是证据。结束时只能用 launch.sh stop 安全收口，禁止 raw PID kill。',
   },
   'canary-bootstrap-plan': {
     usage: '<controller-root>/scripts/goal-control/canary-plan-launch.sh [--node-executable <canonical-absolute-path>] canary-bootstrap-plan --repository-worktree <frozen-goal-worktree> --manifest <json> --role DEV|REVIEW|RECEIPT --task <id> --expected-head <40sha> --operation-id <stable-id> --challenge <64hex> --canary-policy <repo-relative-path> --canary-policy-sha256 <sha256> [--json]',
@@ -260,15 +261,25 @@ const GOAL_HELP = Object.freeze({
     summary: '接受成功才迁移状态；普通聊天与模板输出都不迁移状态。',
     safety: '这是持久化写命令：成功时追加 accepted event 并推进控制状态；响应丢失只能以同一 event ID、逐字相同 envelope 与原 capability 精确重试。',
   },
+  'prepare-probe-observation-challenge': {
+    usage: 'goalctl prepare-probe-observation-challenge --goal <id> --task <id> --role <role> --thread <id> [--host <id>] [--attempt <n>] --event-id <registration-or-recovery-id> --canary-plan-sha256 <sha256> --issuer-capability-file <bootstrap|recovery|live-authorizer-capability> [--json]',
+    summary: '在 host adapter 执行 replay/probes 前，由 controller durable issuer 生成一次性 challenge，并精确绑定 plan、event、Goal/task/role 与 thread/host/attempt。',
+    safety: '同一 event/request exact retry 返回同一 challenge；异文冲突。测试 namespace 只有隔离临时 repository/control root 才能签发，production challenge 只绑定 HOST_ADAPTER。',
+  },
   'register-role': {
-    usage: 'goalctl register-role --goal <id> --task <id> --role <role> --thread <id> [--host <id>] [--attempt <n>] [--lease-ms <ms>] [--status active|idle] [--launch-id <id>] [--event-id <stable-id>] [--bootstrap-capability-file <file>|--foreman-recovery-capability-file <file>|--authorizer-capability-file <file>|--actor-capability-file <existing-actor-file>] [--authorizer-thread <id>] [--worker-bootstrap-receipt <absolute-json> --worker-bootstrap-receipt-sha256 <sha256> --worker-bootstrap-operation-id <id> --worker-bootstrap-challenge <64hex> --worker-bootstrap-identity-plan-sha256 <sha256>] [--json]',
-    summary: 'Goal-wide FOREMAN 有三条明确路径：首次 bootstrap 登记；后续 task 以同一 Goal authority 的 identity/attempt/status/capability 做 projection；失联后走 recovery replacement，存在多个 current projections 时必须用 recover-expired-foreman 批量替换。CAPTAIN 与 worker 仍由当前授权链签发独立 capability；启用 worker canary bootstrap 的 Goal 会把 sealed actual worker worktree identity 写入 registration。',
-    safety: '这是持久化写命令：首次调用会发布 durable registration intent、actor capability 与 REGISTER_ROLE event。启用 worker canary bootstrap 时，DEV/REVIEW/RECEIPT 必须从 receipt-bound actual worker process cwd 调用，并逐项携带 canary 已验证的 receipt/hash/operation/challenge/plan；兄弟/CAPTAIN checkout 即使 HEAD 相同也拒绝且零控制面写入。省略 --event-id 时使用绑定 task/host/thread/role/attempt 的 deterministic ID；响应丢失必须以同一 request、同一 ID 和原 authorizer 或 actor capability exact retry。历史 exact retry 只返回原 registration/session/capability，不代表该历史 actor 仍具当前 operational authority；任何不同请求复用同一 ID 都拒绝。',
+    usage: 'goalctl register-role --goal <id> --task <id> --role <role> --thread <id> [--host <id>] [--attempt <n>] [--lease-ms <ms>] [--status active|idle] [--launch-id <id>] [--event-id <stable-id>] [--bootstrap-capability-file <file>|--foreman-recovery-capability-file <file>|--authorizer-capability-file <file>|--actor-capability-file <existing-actor-file>] [--authorizer-thread <id>] [--worker-bootstrap-receipt <absolute-json> --worker-bootstrap-receipt-sha256 <sha256> --worker-bootstrap-operation-id <id> --worker-bootstrap-challenge <64hex> --worker-bootstrap-identity-plan-sha256 <sha256>] [--probe-observation-receipt <0600-json> --probe-observation-receipt-sha256 <sha256> --probe-observation-plan <0600-json> --probe-observation-plan-sha256 <sha256> --probe-observation-stable-id <id> --probe-observation-challenge <64hex>] [--json]',
+    summary: 'Goal-wide FOREMAN 有三条明确路径：首次 bootstrap 登记；后续 task 以同一 Goal authority 的 identity/attempt/status/capability 做 projection；失联后走 recovery replacement，存在多个 current projections 时必须用 recover-expired-foreman 批量替换。CAPTAIN 与 worker 仍由当前授权链签发独立 capability；启用 worker canary bootstrap 的 Goal 会把 sealed actual worker worktree identity 写入 registration。启用 probe_observation_receipts 后，所有角色 registration 都必须先机械验证 explicit replay + ordered host-adapter receipt，并得到 PASS 或 policy-finalized KNOWN_LIMITATION。',
+    safety: '这是持久化写命令：首次调用会发布 durable registration intent、actor capability 与 REGISTER_ROLE event。启用 probe observation protocol 时，core 只 no-follow/有界读取并验证 sealed receipt；真实 GitHub CLI/Git transport/GitHub App/Browser/task broker 探针由 host adapter 执行。缺项、乱序、cross-identity、旧 plan/challenge、replay、过期或非 PASS 在任何 durable registration 写入前 fail closed；Allow/auth prompt 确定性 FAIL，不请求用户点击。启用 worker canary bootstrap 时，DEV/REVIEW/RECEIPT 必须从 receipt-bound actual worker process cwd 调用。省略 --event-id 时使用 deterministic ID；响应丢失必须以同一 request、stable ID 和原 capability exact retry，异文冲突。',
+  },
+  'refresh-probe-observation': {
+    usage: 'goalctl refresh-probe-observation --goal <id> --task <id> --role <role> --thread <id> [--host <id>] --attempt <n> --expected-state-revision <n> --expected-binding-sha256 <sha256> --event-id <stable-id> --actor-capability-file <current-role-capability> --probe-observation-receipt <0600-json> --probe-observation-receipt-sha256 <sha256> --probe-observation-plan <0600-json> --probe-observation-plan-sha256 <sha256> --probe-observation-stable-id <id> --probe-observation-challenge <64hex> [--json]',
+    summary: '在 current CAPTAIN/worker receipt 仍 live 时，以 accepted_at、current canonical plan、session identity/attempt、state revision 与 old binding hash 做 CAS，原子替换 fresh controller-held sealed binding。',
+    safety: '先以相同 refresh event ID 准备 fresh challenge。旧 receipt 已过期、fresh receipt 过期/伪造/异文、HEAD/plan/identity/attempt/CAS 漂移均在 event append 前 fail closed。响应丢失只允许同一 event ID、逐字相同 request 与原 actor capability exact retry；变体冲突。',
   },
   'recover-expired-foreman': {
-    usage: 'goalctl recover-expired-foreman --repository-worktree <frozen-goal-worktree> --goal <id> --task <anchor-task-id> --thread <fresh-id> --host <id> --attempt <n> --lease-ms <ms> [--expected-control-epoch <n>] --expected-goal-scope-sha256 <sha256> --reason <text> --incident-ref <ref> --foreman-recovery-capability-file <0600-file> --event-id <stable-root-id> [--json]',
+    usage: 'goalctl recover-expired-foreman --repository-worktree <frozen-goal-worktree> --goal <id> --task <anchor-task-id> --thread <fresh-id> --host <id> --attempt <n> --lease-ms <ms> [--expected-control-epoch <n>] --expected-goal-scope-sha256 <sha256> --reason <text> --incident-ref <ref> --foreman-recovery-capability-file <0600-file> --event-id <stable-root-id> --probe-observation-receipt <0600-json> --probe-observation-receipt-sha256 <sha256> --probe-observation-plan <0600-json> --probe-observation-plan-sha256 <sha256> --probe-observation-stable-id <id> --probe-observation-challenge <64hex> [--json]',
     summary: '调用前持久化 root event ID；CAS Goal-wide coherent FOREMAN replicas，以非 ARCHIVED 的 current FOREMAN projections 为 target，按 durable intent→per-target event→commit 的可恢复事务整体 fence/adopt fresh FOREMAN。',
-    safety: 'pending root transaction 冻结其它写入，只允许同一 ID/request/capability 精确续跑；--expected-goal-scope-sha256 是必需的 Goal-wide CAS，--expected-control-epoch 与旧版 per-task expected-* 只作可选兼容 guard，不能替代它。普通 batch 不触碰未投影的非归档 task；仅当没有 current projection 时，显式 anchor 才能从当前最大 attempt 的 ARCHIVED lineage adoption 为一个新 projection。其余 ARCHIVED 投影不改写。不续租、转移或回收任何 runtime/resource lease。',
+    safety: 'recovery 是 activation path：fresh 请求必须先以 root event ID 准备 challenge 并提交 fresh canonical replay + ordered PASS receipt；缺失/过期/tampered 时零 task event 写入。pending root transaction 冻结其它写入，只允许同一 ID/request/capability/receipt 精确续跑；--expected-goal-scope-sha256 是必需的 Goal-wide CAS，--expected-control-epoch 与旧版 per-task expected-* 只作可选兼容 guard，不能替代它。普通 batch 不触碰未投影的非归档 task；仅当没有 current projection 时，显式 anchor 才能从当前最大 attempt 的 ARCHIVED lineage adoption 为一个新 projection。其余 ARCHIVED 投影不改写。不续租、转移或回收任何 runtime/resource lease。',
   },
   status: {
     usage: 'goalctl status [--repository-worktree <frozen-goal-worktree>] --goal <id> [--task <id>] [--json]',
@@ -515,7 +526,7 @@ function scaffoldGoal(cwd, options) {
   const repositoryRoot = repoRoot(cwd);
   const source = existingRepoFile(repositoryRoot, options.specFile, 'scaffold spec');
   const spec = assertPlainObject(readJson(source.absolute, 'scaffold spec'), 'INVALID_SCAFFOLD_SPEC', 'scaffold spec');
-  assertOnlyKeys(spec, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'tasks'], 'INVALID_SCAFFOLD_SPEC', 'scaffold spec');
+  assertOnlyKeys(spec, ['schema_version', 'goal_id', 'title', 'mode', 'repository', 'base_head', 'protocol', 'preclaim', 'worker_canary_bootstrap', 'probe_observation_receipts', 'tasks'], 'INVALID_SCAFFOLD_SPEC', 'scaffold spec');
   assertControl(spec.schema_version === 1, 'UNSUPPORTED_SCHEMA', 'scaffold spec.schema_version 必须为 1');
   const goalId = safeId(spec.goal_id, 'scaffold goal_id');
   const mode = spec.mode || 'shadow';
@@ -598,6 +609,11 @@ function scaffoldGoal(cwd, options) {
     ...(spec.preclaim !== undefined ? { preclaim: spec.preclaim } : {}),
     ...(spec.worker_canary_bootstrap !== undefined
       ? { worker_canary_bootstrap: spec.worker_canary_bootstrap } : {}),
+    ...(spec.probe_observation_receipts !== undefined
+      ? {
+        probe_observation_receipts:
+          spec.probe_observation_receipts,
+      } : {}),
     tasks,
   };
   const expected = new Map();
@@ -1354,6 +1370,25 @@ function createLaunchTemplate(cwd, options) {
     role: options.role,
     threadId: options.threadId,
   });
+  if (loaded.manifest.probe_observation_receipts) {
+    const {
+      assertLivePassBinding,
+    } = require('./canary-observation-receipt');
+    assertControl(
+      session.probe_observation,
+      'CANARY_OBSERVATION_REQUIRED',
+      'launch-template 前缺 sealed probe observation PASS binding',
+    );
+    assertLivePassBinding(
+      session.probe_observation,
+      undefined,
+      {
+        repositoryHead: state.full_head,
+        role: options.role,
+        taskId: options.taskId,
+      },
+    );
+  }
   assertOperationalScope(state, options.role, 'LAUNCH_TEMPLATE');
   assertControl(!state.recovery, 'RECOVERY_REQUIRED', `launch-template 前必须先闭合 ${state.recovery && state.recovery.role} recovery`);
   assertControl(

@@ -13,6 +13,9 @@ const {
 } = require('./auth');
 const { assertDevCandidateLineage } = require('./candidate-lineage');
 const {
+  assertRequiredLiveBinding,
+} = require('./canary-observation-receipt');
+const {
   evidenceAcceptanceAnchor,
   evidenceFile,
   readExistingEvidenceForRetryUnderLock,
@@ -190,12 +193,34 @@ function prepare(cwd, options, role) {
   assertControl(task, 'UNKNOWN_TASK', `未知 task ${options.taskId}`);
   const session = authorizeSession(task, options.actorCapabilityFile, { role });
   assertFrozenInputs(cwd, loaded, options.taskId);
-  assertControl(task.phase === 'DEV_ACTIVE', 'GATE_PHASE_MISMATCH', `${role} gate 只允许在 DEV_ACTIVE 生成候选 evidence`);
-  assertOperationalScope(task, 'DEV', 'GATE_EVIDENCE');
-  assertControl(task.holds.length === 0, 'TASK_HELD', `task 存在 hold: ${task.holds.map((hold) => hold.kind).join(',')}`);
   const worktree = repoRoot(cwd);
   const fullHead = git(worktree, ['rev-parse', 'HEAD']);
   assertFullSha(fullHead, 'candidate HEAD');
+  assertRequiredLiveBinding(
+    loaded.manifest,
+    session,
+    `${role} ${role === 'CAPTAIN' ? 'FULL/AC' : 'Fast'} gate`,
+    undefined,
+    {
+      repositoryHead: fullHead,
+      role,
+      taskId: options.taskId,
+    },
+  );
+  assertRequiredLiveBinding(
+    loaded.manifest,
+    task.sessions.DEV,
+    'candidate FULL scope',
+    undefined,
+    {
+      repositoryHead: fullHead,
+      role: 'DEV',
+      taskId: options.taskId,
+    },
+  );
+  assertControl(task.phase === 'DEV_ACTIVE', 'GATE_PHASE_MISMATCH', `${role} gate 只允许在 DEV_ACTIVE 生成候选 evidence`);
+  assertOperationalScope(task, 'DEV', 'GATE_EVIDENCE');
+  assertControl(task.holds.length === 0, 'TASK_HELD', `task 存在 hold: ${task.holds.map((hold) => hold.kind).join(',')}`);
   assertDevCandidateLineage(worktree, task, task.sessions.DEV, fullHead);
   assertControl(git(worktree, ['status', '--porcelain=v1', '--untracked-files=all']) === '', 'DIRTY_WORKTREE', 'mechanical evidence 只允许审核 clean committed HEAD');
   return { loaded, task, session, worktree, fullHead };
@@ -943,7 +968,7 @@ function registerGate(
     }
     const { task, session } = boundary;
 
-    const createdAt = nowIso();
+    const createdAt = boundary.acceptedAt;
     const request = gateRequest(options, kind);
     const stored = storeArtifactUnderLock(root, options, kind, {
       schema_version: 1,
@@ -1085,6 +1110,29 @@ function registerGate(
         threadId: context.session.thread_id,
       });
       assertFrozenInputs(cwd, loaded, options.taskId);
+      const receiptAcceptedAt = nowIso();
+      assertRequiredLiveBinding(
+        loaded.manifest,
+        session,
+        `${session.role} ${kind} gate`,
+        Date.parse(receiptAcceptedAt),
+        {
+          repositoryHead: context.fullHead,
+          role: session.role,
+          taskId: options.taskId,
+        },
+      );
+      assertRequiredLiveBinding(
+        loaded.manifest,
+        task.sessions.DEV,
+        'candidate FULL scope',
+        Date.parse(receiptAcceptedAt),
+        {
+          repositoryHead: context.fullHead,
+          role: 'DEV',
+          taskId: options.taskId,
+        },
+      );
       assertControl(
         task.phase === 'DEV_ACTIVE',
         'GATE_PHASE_MISMATCH',
@@ -1103,7 +1151,12 @@ function registerGate(
         task.sessions.DEV,
         context.fullHead,
       );
-      boundary = { loaded, task, session };
+      boundary = {
+        loaded,
+        task,
+        session,
+        acceptedAt: receiptAcceptedAt,
+      };
       assertGateTransactionBindingStable(
         transactionBinding,
         session,

@@ -1,6 +1,7 @@
 'use strict';
 
 const { assertControl } = require('./errors');
+const { runtimeNowMilliseconds } = require('./util');
 
 const FULL = 'FULL';
 const RECOVERY_BLOCKED = 'RECOVERY_BLOCKED';
@@ -9,6 +10,19 @@ const PREFLIGHT_ONLY = 'PREFLIGHT_ONLY';
 function sessionOperationalScope(state, role) {
   const session = state && state.sessions && state.sessions[role];
   if (!session) return null;
+  if (
+    state.probe_observation_required
+      && (
+        !session.probe_observation
+          || !['PASS', 'KNOWN_LIMITATION'].includes(
+            session.probe_observation.aggregate_disposition,
+          )
+          || runtimeNowMilliseconds()
+            >= Date.parse(session.probe_observation.expires_at)
+      )
+  ) {
+    return PREFLIGHT_ONLY;
+  }
   if (role === 'DEV' && session.recovered_from) {
     return session.operational_scope || RECOVERY_BLOCKED;
   }

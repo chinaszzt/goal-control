@@ -288,7 +288,7 @@ Browser（若 REQUIRED）也排在 GitHub App 之前，GitHub App 永远是最�
 启动授权绑定的 committed canary policy 含上述 exact marker、operation/repo 精确匹配、
 结果正好为 `404/repo_not_found`，且当前 session 的全部补偿 probe 都 PASS 时，该
 404 才先记 `PROVISIONAL_KNOWN_LIMITATION`，最终聚合为
-`KNOWN_CONNECTOR_LIMITATION` 并让整体 canary PASS；其它结果仍 FAIL。即使 policy
+`KNOWN_LIMITATION` 并让整体 canary PASS；其它结果仍 FAIL。即使 policy
 允许用 `gh` 执行角色范围内的 issue/PR/check/review 操作，manifest 绑定
 `goalctl-github-squash-v1` 时也仍禁止 direct `gh pr merge`，merge 只走
 `goalctl merge-pr`。GitHub App probe 是每个角色 `required_probes` 中的独立必做项，
@@ -305,10 +305,11 @@ role，CAPTAIN 固定不需要 Browser（resource schema 不含 CAPTAIN role）�
 时也禁止传 `--browser-canary-receipt`；它是对 exact committed bytes 的机械结论，不是
 canary policy 例外，也不豁免 GitHub App 等其它 required probe。
 每项只记录 PASS/FAIL、工具身份、时间和 receipt 链接，不把凭证或冗长输出写进聊天。
-当前 v1 的 hash-bound plan 机械规定 operation、顺序和聚合条件，但自由文本
-`CANARY_PASS` 尚不是结构化 observation receipt；不得宣称 controller 已从聊天机械验证
-实际调用顺序。独立监督方仍需按 plan/evidence 复核，后续可再增加 observation
-evaluator。
+启用 manifest-bound `probe_observation_receipts` 时，真实 host adapter 必须产出
+Ed25519-attested structured receipt，绑定 controller challenge、canonical plan、
+实际 session identity、显式 replay、ordered results/evidence 与 TTL。controller core
+只机械验证并保存 sealed bytes；自由文本 `CANARY_PASS` 和聊天摘要永远不是证据。
+receipt PASS 前 registration、launch 与 FULL scope 均 fail closed。
 
 pre-init supervisor/host canary 失败时不运行 preclaim/init。未登记的 `CANARY_ONLY`
 或 dynamic bootstrap session 失败时不登记、不发 capability、不消费 lease；dynamic

@@ -240,7 +240,7 @@ type CanaryPlan = {
       ];
       finalization_condition:
         "ALL_LISTED_COMPENSATION_PROBES_PASS_CURRENT_SESSION";
-      final_disposition: "KNOWN_CONNECTOR_LIMITATION";
+      final_disposition: "KNOWN_LIMITATION";
     }>;
   };
   browser: {
@@ -1313,7 +1313,7 @@ describe("goalctl canary-plan", () => {
         ],
         finalization_condition:
           "ALL_LISTED_COMPENSATION_PROBES_PASS_CURRENT_SESSION",
-        final_disposition: "KNOWN_CONNECTOR_LIMITATION",
+        final_disposition: "KNOWN_LIMITATION",
       }],
     });
     expect(captain.required_probes.at(-1))

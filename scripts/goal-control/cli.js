@@ -15,6 +15,8 @@ const {
   loadGoalState,
   loadGoalStateReadOnly,
   nextTasks,
+  prepareProbeObservationChallenge,
+  refreshProbeObservation,
   rebuildLedger,
   recoverExpiredForeman,
   registerRole,
@@ -152,6 +154,23 @@ function goalCommand(
   }
   if (command === 'init') {
     return { value: initializeGoal(cwd, requireArg(args, 'manifest')), exitCode: 0 };
+  }
+  if (command === 'prepare-probe-observation-challenge') {
+    return {
+      value: prepareProbeObservationChallenge(cwd, {
+        goalId: requireArg(args, 'goal'),
+        taskId: requireArg(args, 'task'),
+        role: validateRole(requireArg(args, 'role')),
+        threadId: requireArg(args, 'thread'),
+        hostId: args.host || 'local',
+        attempt: optionalInteger(args.attempt, 'attempt', 1),
+        eventId: requireArg(args, 'event_id'),
+        planSha256: requireArg(args, 'canary_plan_sha256'),
+        issuerCapabilityFile:
+          requireArg(args, 'issuer_capability_file'),
+      }),
+      exitCode: 0,
+    };
   }
   if (command === 'canary-plan') {
     const allowed = new Set([
@@ -469,9 +488,76 @@ function goalCommand(
         args.worker_bootstrap_challenge || null,
       workerBootstrapIdentityPlanSha256:
         args.worker_bootstrap_identity_plan_sha256 || null,
+      probeObservationReceipt:
+        args.probe_observation_receipt || null,
+      probeObservationReceiptSha256:
+        args.probe_observation_receipt_sha256 || null,
+      probeObservationPlan:
+        args.probe_observation_plan || null,
+      probeObservationPlanSha256:
+        args.probe_observation_plan_sha256 || null,
+      probeObservationStableId:
+        args.probe_observation_stable_id || null,
+      probeObservationChallenge:
+        args.probe_observation_challenge || null,
       invocationCwd,
     });
     return { value, exitCode: 0 };
+  }
+  if (command === 'refresh-probe-observation') {
+    const role = validateRole(requireArg(args, 'role'));
+    return {
+      value: refreshProbeObservation(cwd, {
+        goalId: requireArg(args, 'goal'),
+        taskId: requireArg(args, 'task'),
+        role,
+        threadId: requireArg(args, 'thread'),
+        hostId: args.host || 'local',
+        attempt: optionalInteger(
+          requireArg(args, 'attempt'),
+          'attempt',
+        ),
+        expectedStateRevision: optionalInteger(
+          requireArg(args, 'expected_state_revision'),
+          'expected-state-revision',
+        ),
+        expectedBindingSha256: requireArg(
+          args,
+          'expected_binding_sha256',
+        ),
+        eventId: requireArg(args, 'event_id'),
+        actorCapabilityFile: requireArg(
+          args,
+          'actor_capability_file',
+        ),
+        probeObservationReceipt: requireArg(
+          args,
+          'probe_observation_receipt',
+        ),
+        probeObservationReceiptSha256: requireArg(
+          args,
+          'probe_observation_receipt_sha256',
+        ),
+        probeObservationPlan: requireArg(
+          args,
+          'probe_observation_plan',
+        ),
+        probeObservationPlanSha256: requireArg(
+          args,
+          'probe_observation_plan_sha256',
+        ),
+        probeObservationStableId: requireArg(
+          args,
+          'probe_observation_stable_id',
+        ),
+        probeObservationChallenge: requireArg(
+          args,
+          'probe_observation_challenge',
+        ),
+        invocationCwd,
+      }),
+      exitCode: 0,
+    };
   }
   if (command === 'recover-expired-foreman') {
     const value = recoverExpiredForeman(cwd, {
@@ -504,6 +590,19 @@ function goalCommand(
       incidentRef: requireArg(args, 'incident_ref'),
       foremanRecoveryCapabilityFile: requireArg(args, 'foreman_recovery_capability_file'),
       eventId: requireArg(args, 'event_id'),
+      probeObservationReceipt:
+        args.probe_observation_receipt || null,
+      probeObservationReceiptSha256:
+        args.probe_observation_receipt_sha256 || null,
+      probeObservationPlan:
+        args.probe_observation_plan || null,
+      probeObservationPlanSha256:
+        args.probe_observation_plan_sha256 || null,
+      probeObservationStableId:
+        args.probe_observation_stable_id || null,
+      probeObservationChallenge:
+        args.probe_observation_challenge || null,
+      invocationCwd,
     });
     return { value, exitCode: 0 };
   }

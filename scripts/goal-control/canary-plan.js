@@ -466,7 +466,7 @@ function probeEvaluationContract(
           ],
           finalization_condition:
             'ALL_LISTED_COMPENSATION_PROBES_PASS_CURRENT_SESSION',
-          final_disposition: 'KNOWN_CONNECTOR_LIMITATION',
+          final_disposition: 'KNOWN_LIMITATION',
         }]
         : []
     ),
@@ -1436,6 +1436,36 @@ function canaryPlan(
       requiredProbes,
       canaryPolicy,
     ),
+    observation_receipt: manifest.probe_observation_receipts
+      ? {
+        protocol: manifest.probe_observation_receipts.protocol,
+        schema: 'scripts/goal-control/schemas/canary-observation-receipt.schema.json',
+        max_ttl_ms: manifest.probe_observation_receipts.max_ttl_ms,
+        host_attestation: {
+          algorithm:
+            manifest.probe_observation_receipts.host_attestation.algorithm,
+          key_id:
+            manifest.probe_observation_receipts.host_attestation.key_id,
+          public_key_sha256:
+            manifest.probe_observation_receipts.host_attestation
+              .public_key_sha256,
+        },
+        aggregate_dispositions: [
+          'PASS',
+          'PROVISIONAL_KNOWN_LIMITATION',
+          'KNOWN_LIMITATION',
+          'FAIL',
+        ],
+        registration_gate:
+          'PASS_OR_POLICY_FINALIZED_KNOWN_LIMITATION',
+        launch_gate:
+          'PASS_OR_POLICY_FINALIZED_KNOWN_LIMITATION',
+        full_scope_gate:
+          'PASS_OR_POLICY_FINALIZED_KNOWN_LIMITATION',
+        interactive_allow_or_auth: 'FAIL',
+        executor_boundary: 'HOST_ADAPTER_EXECUTES_CORE_VALIDATES_ONLY',
+      }
+      : null,
     browser: {
       decision: browserRequired ? 'REQUIRED' : 'NOT_REQUIRED',
       trigger_kinds: ['BROWSER_PROFILE', 'WINDOW'],
