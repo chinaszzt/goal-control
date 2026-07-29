@@ -629,7 +629,7 @@
         },
         {
           "not": {
-            "pattern": "(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
+            "pattern": "(?:^|[^A-Za-z0-9])(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}|[aA][kK][iI][aA][0-9A-Za-z]{16}|[aA][sS][iI][aA][0-9A-Za-z]{16}|[aA][iI][zZ][aA][0-9A-Za-z_-]{20,}|[nN][pP][mM]_[A-Za-z0-9]{16,}|[pP][yY][pP][iI]-[A-Za-z0-9_-]{16,}|[eE][yY][jJ][A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])"
           }
         }
       ]
@@ -1187,12 +1187,17 @@
         },
         {
           "not": {
-            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,}|[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
+            "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
           }
         },
         {
           "not": {
             "pattern": "(?:^|[^A-Za-z0-9])(?:(?:[sS][kK]|[pP][kK]|[rR][kK]|[aA][pP][iI]|[aA][uU][tT][hH]|[tT][oO][kK][eE][nN]|[sS][eE][cC][rR][eE][tT]|[bB][eE][aA][rR][eE][rR]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[aA][cC][cC][eE][sS][sS][_-]?[kK][eE][yY])[_-](?:[lL][iI][vV][eE]|[tT][eE][sS][tT]|[pP][rR][oO][dD]|[pP][rR][oO][jJ]|[kK][eE][yY])?[_-]?[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[^A-Za-z0-9])(?:[gG][lL][pP][aA][tT]-[A-Za-z0-9_-]{8,}|[hH][fF]_[A-Za-z0-9_-]{8,}|[xX][aA][iI]-[A-Za-z0-9_-]{8,}|[sS][kK][0-9a-fA-F]{32}|[sS][gG]\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}|[aA][kK][iI][aA][0-9A-Za-z]{16}|[aA][sS][iI][aA][0-9A-Za-z]{16}|[aA][iI][zZ][aA][0-9A-Za-z_-]{20,}|[nN][pP][mM]_[A-Za-z0-9]{16,}|[pP][yY][pP][iI]-[A-Za-z0-9_-]{16,}|[eE][yY][jJ][A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])"
           }
         },
         {

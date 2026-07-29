@@ -109,6 +109,19 @@ function compileDraft202012(
 const PLATFORM_THREAD = "019fabbe-3b38-7a23-8d8f-8c392bced038";
 const PLATFORM_HOST = "019fabbe-3b38-7a23-8d8f-8c392bced039";
 const PLATFORM_SESSION = "019fabbe-3b38-7a23-8d8f-8c392bced03a";
+const GENERIC_PROVIDER_TOKEN_CASES = [
+  ["glpat", `GlPaT-${"A".repeat(12)}`],
+  ["hugging-face", `Hf_${"B".repeat(12)}`],
+  ["xai", `XaI-${"C".repeat(12)}`],
+  ["sendgrid-key", `sK${"aB".repeat(16)}`],
+  ["sendgrid-token", `sG.${"D".repeat(12)}.${"E".repeat(12)}`],
+  ["aws-akia", `aKiA${"F".repeat(16)}`],
+  ["aws-asia", `aSiA${"G".repeat(16)}`],
+  ["google", `aIzA${"H".repeat(20)}`],
+  ["npm", `NpM_${"I".repeat(16)}`],
+  ["pypi", `PyPi-${"J".repeat(16)}`],
+  ["jwt", `EyJ${"K".repeat(8)}.${"L".repeat(8)}.${"M".repeat(8)}`],
+] as const;
 
 describe("goal-control machine contract schemas", () => {
   it("requires v2 identity only across the durable new-goal protocol boundary", () => {
@@ -539,6 +552,22 @@ describe("goal-control machine contract schemas", () => {
       missingObservation,
       false,
     );
+    for (const [, token] of GENERIC_PROVIDER_TOKEN_CASES) {
+      const wrapped = `prefix.${token}.suffix`;
+      const embedded = `prefixx${token}suffix`;
+      parity(
+        schemaObservation,
+        runtimeObservation,
+        { ...observation, operation_id: wrapped },
+        false,
+      );
+      parity(
+        schemaObservation,
+        runtimeObservation,
+        { ...observation, operation_id: embedded },
+        true,
+      );
+    }
 
     parity(
       schemaIntent,
@@ -719,6 +748,55 @@ describe("goal-control machine contract schemas", () => {
       bundle_sha256: hashObject(bundleUnsigned),
     };
     expect(compositeBundle(bundle)).toBe(true);
+    const bundleForOperationId = (
+      operationId: string,
+    ): Record<string, any> => {
+      const candidateIntent = sealIntent({
+        ...intentCore,
+        operation_id: operationId,
+      });
+      const candidateChallengeUnsigned = {
+        ...challengeUnsigned,
+        registration_event_id: operationId,
+      };
+      const candidateChallenge = {
+        ...candidateChallengeUnsigned,
+        record_sha256: hashObject(candidateChallengeUnsigned),
+      };
+      const candidateUnsigned = {
+        schema_version: 2,
+        kind: "ROLE_IDENTITY_CHALLENGE_BUNDLE",
+        operation_id: operationId,
+        semantic_slot_sha256:
+          candidateIntent.semantic_slot_sha256,
+        intent: candidateIntent,
+        challenge: candidateChallenge,
+      };
+      return {
+        ...candidateUnsigned,
+        bundle_sha256: hashObject(candidateUnsigned),
+      };
+    };
+    for (const [, token] of GENERIC_PROVIDER_TOKEN_CASES) {
+      const wrapped = `prefix.${token}.suffix`;
+      const embedded = `prefixx${token}suffix`;
+      parity(
+        schemaIntent,
+        runtimeIntent,
+        sealIntent({ ...intentCore, operation_id: wrapped }),
+        false,
+      );
+      parity(
+        schemaIntent,
+        runtimeIntent,
+        sealIntent({ ...intentCore, operation_id: embedded }),
+        true,
+      );
+      expect(compositeBundle(bundleForOperationId(wrapped)))
+        .toBe(false);
+      expect(compositeBundle(bundleForOperationId(embedded)))
+        .toBe(true);
+    }
     const bundleExtra = {
       ...structuredClone(bundle),
       nested_extra: { arbitrary: "rejected" },
@@ -934,6 +1012,19 @@ describe("goal-control machine contract schemas", () => {
         },
       };
     };
+    const resealEventProbeObservation = (
+      value: Record<string, any>,
+    ): Record<string, any> => {
+      const probeObservation =
+        value.payload.probe_observation;
+      delete probeObservation.binding_sha256;
+      probeObservation.binding_sha256 =
+        hashObject(probeObservation);
+      value.payload.role_identity
+        .probe_observation_binding_sha256 =
+        probeObservation.binding_sha256;
+      return value;
+    };
 
     parity(withIdentity(identityV1), true);
     parity(withIdentity(identityV2), true);
@@ -1048,6 +1139,26 @@ describe("goal-control machine contract schemas", () => {
     credentialPlanUrl.payload.probe_observation.plan_file =
       `https://example.invalid/plan?api_key=${"E".repeat(24)}`;
     parity(credentialPlanUrl, false);
+    for (const [, token] of GENERIC_PROVIDER_TOKEN_CASES) {
+      const wrapped = `prefix.${token}.suffix`;
+      const embedded = `prefixx${token}suffix`;
+      parity(withIdentity({
+        ...identityV2,
+        operation_id: wrapped,
+      }), false);
+      parity(withIdentity({
+        ...identityV2,
+        operation_id: embedded,
+      }), true);
+      const wrappedPath = withIdentity(identityV2);
+      wrappedPath.payload.probe_observation.receipt_file =
+        `/private/${wrapped}`;
+      parity(resealEventProbeObservation(wrappedPath), false);
+      const embeddedPath = withIdentity(identityV2);
+      embeddedPath.payload.probe_observation.receipt_file =
+        `/private/${embedded}`;
+      parity(resealEventProbeObservation(embeddedPath), true);
+    }
   });
 
   it("defines the canonical sealed probe observation receipt contract", () => {

@@ -610,6 +610,81 @@ function prepareRoleIdentityChallenge(
   };
 }
 
+function registerPreparedControlIdentity(
+  repository: ReturnType<typeof integrationRepository>,
+  artifactRoot: string,
+  prepared: ReturnType<typeof prepareRoleIdentityChallenge>,
+  values: {
+    taskId: string;
+    role: "FOREMAN" | "CAPTAIN";
+    attempt: number;
+    authorizerCapabilityFile: string;
+  },
+): Record<string, any> {
+  const operationId = prepared.identity.operation_id;
+  const stableId = `canary-observation-${operationId}`;
+  const repositoryHead = loadGoalStateReadOnly(
+    repository.root,
+    "goal-receipt-integration",
+    (loaded) => loaded.snapshot.tasks[values.taskId].full_head,
+  );
+  const receipt = fakeReceipt({
+    registrationEventId: operationId,
+    goalId: "goal-receipt-integration",
+    taskId: values.taskId,
+    role: values.role,
+    threadId: prepared.identity.thread_id,
+    hostId: prepared.identity.host_id,
+    attempt: values.attempt,
+    repositoryHead,
+    repositoryWorktree: repository.root,
+    invocationCwd: repository.root,
+    validatedManifestSha256: repository.manifest.manifest_sha256,
+    manifest: repository.manifest,
+    hostAttestationPrivateKey: repository.hostAttestationPrivateKey,
+    stableId,
+    challenge: prepared.challenge.challenge,
+    challengeRecord: prepared.challenge,
+    planEnvelope: prepared.planEnvelope,
+    evidenceDirectory: path.join(
+      repository.controlDir,
+      `authority-evidence-${operationId}`,
+    ),
+  });
+  const planFile = path.join(
+    artifactRoot,
+    `${operationId}-registration-plan.json`,
+  );
+  const receiptFile = path.join(
+    artifactRoot,
+    `${operationId}-registration-receipt.json`,
+  );
+  writePrivateJson(planFile, prepared.planEnvelope);
+  writePrivateJson(receiptFile, receipt);
+  return goalCommand([
+    "register-role",
+    "--goal", "goal-receipt-integration",
+    "--task", values.taskId,
+    "--role", values.role,
+    "--thread", prepared.identity.thread_id,
+    "--host", prepared.identity.host_id,
+    "--attempt", String(values.attempt),
+    "--event-id", operationId,
+    "--authorizer-capability-file",
+    values.authorizerCapabilityFile,
+    "--probe-observation-receipt", receiptFile,
+    "--probe-observation-receipt-sha256",
+    fileSha256(receiptFile),
+    "--probe-observation-plan", planFile,
+    "--probe-observation-plan-sha256",
+    prepared.planEnvelope.canary_plan_sha256,
+    "--probe-observation-stable-id", stableId,
+    "--probe-observation-challenge",
+    prepared.challenge.challenge,
+    "--json",
+  ], repository.root).value;
+}
+
 function prepareWorkerBootstrap(
   repository: ReturnType<typeof integrationRepository>,
   frozenRepositoryWorktree: string,
@@ -2561,7 +2636,111 @@ describe("sealed probe observation receipt", () => {
       .toEqual(beforeReplacementRetry);
   });
 
-  test("reauthenticates deleted, replaced, and expired issuer authority on exact retry", () => {
+  test("requires a v2 durable marker before fresh role identity production", () => {
+    for (const marker of [undefined, 1] as const) {
+      const repository = integrationRepository();
+      process.env.GOAL_CONTROL_DIR = repository.controlDir;
+      process.env.GOAL_CONTROL_TEST_MODE = "1";
+      const initialized = goalCommand([
+        "init",
+        "--manifest", repository.manifestFile,
+        "--json",
+      ], repository.root).value;
+      const artifacts = realpathSync(mkdtempSync(
+        path.join(tmpdir(), "goal-role-identity-legacy-marker-"),
+      ));
+      roots.push(artifacts);
+      chmodSync(artifacts, 0o700);
+      const metaFile = loadGoalStateReadOnly(
+        repository.root,
+        "goal-receipt-integration",
+        (loaded) => loaded.paths.meta,
+      );
+      const meta = JSON.parse(readFileSync(metaFile, "utf8"));
+      delete meta.meta_sha256;
+      if (marker === undefined) {
+        delete meta.role_identity_protocol_version;
+      } else {
+        meta.role_identity_protocol_version = marker;
+      }
+      meta.meta_sha256 = hashObject(meta);
+      writePrivateJson(metaFile, meta);
+      const operationId =
+        `legacy-marker-${marker === undefined ? "missing" : "v1"}-1`;
+      const planEnvelope = canaryPlan(repository.root, {
+        manifestFile: path.relative(
+          repository.root,
+          repository.manifestFile,
+        ),
+        role: "FOREMAN",
+        taskId: null,
+        browserCanaryReceipt: null,
+      });
+      const identityFile = path.join(
+        artifacts,
+        `${operationId}-identity.json`,
+      );
+      writePrivateJson(identityFile, roleIdentityObservation(
+        repository,
+        {
+          operationId,
+          taskId: "TASK-A",
+          role: "FOREMAN",
+          threadId: `actual-${operationId}-thread`,
+          hostId: `actual-${operationId}-host`,
+          sessionId: `actual-${operationId}-session`,
+          launchId: null,
+        },
+      ));
+      const before = ordinaryFileSnapshot(repository.controlDir);
+      expect(() => goalCommand([
+        "prepare-probe-observation-challenge",
+        "--goal", "goal-receipt-integration",
+        "--task", "TASK-A",
+        "--role", "FOREMAN",
+        "--event-id", operationId,
+        "--canary-plan-sha256",
+        planEnvelope.canary_plan_sha256,
+        "--issuer-capability-file",
+        String(initialized.bootstrap_capability_file),
+        "--identity-receipt", identityFile,
+        "--identity-receipt-sha256", fileSha256(identityFile),
+        "--json",
+      ], repository.root)).toThrow(expect.objectContaining({
+        code: "ROLE_IDENTITY_PROTOCOL_MIGRATION_REQUIRED",
+      }));
+      expect(ordinaryFileSnapshot(repository.controlDir))
+        .toEqual(before);
+      const unchangedMeta = JSON.parse(
+        readFileSync(metaFile, "utf8"),
+      );
+      expect(unchangedMeta.role_identity_protocol_version)
+        .toBe(marker);
+    }
+
+    const fresh = fixture({
+      role: "FOREMAN",
+      eventTag: "fresh-v2-marker-positive",
+    });
+    const freshMeta = loadGoalStateReadOnly(
+      fresh.repository.root,
+      fresh.options.goalId,
+      (loaded) => loaded.meta,
+    );
+    expect(freshMeta.role_identity_protocol_version).toBe(2);
+    expect(goalCommand([
+      "actions",
+      "--goal", fresh.options.goalId,
+      "--task", fresh.options.taskId,
+      "--json",
+    ], fresh.repository.root).value.role_identity_intent)
+      .toMatchObject({
+        operation_id: fresh.options.registrationEventId,
+        protocol: "goalctl-role-identity-intent-v2",
+      });
+  });
+
+  test("reauthenticates deleted and replaced issuer authority on exact retry", () => {
     for (const mutation of ["deleted", "replaced"] as const) {
       const current = fixture({
         role: "FOREMAN",
@@ -2599,7 +2778,9 @@ describe("sealed probe observation receipt", () => {
       expect(ordinaryFileSnapshot(current.repository.controlDir))
         .toEqual(beforeRetry);
     }
+  });
 
+  test("rejects expired issuer authority on exact retry", () => {
     const repository = integrationRepository();
     process.env.GOAL_CONTROL_DIR = repository.controlDir;
     process.env.GOAL_CONTROL_TEST_MODE = "1";
@@ -2909,6 +3090,39 @@ describe("sealed probe observation receipt", () => {
     });
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeRead);
+    const registered = registerPreparedControlIdentity(
+      repository,
+      artifacts,
+      projected,
+      {
+        taskId: "TASK-B",
+        role: "FOREMAN",
+        attempt: 1,
+        authorizerCapabilityFile:
+          String(foreman.actor_capability_file),
+      },
+    );
+    expect(registered.session).toMatchObject({
+      role: "FOREMAN",
+      thread_id: projected.identity.thread_id,
+      host_id: projected.identity.host_id,
+      attempt: 1,
+      role_identity: {
+        protocol: "goalctl-role-identity-intent-v2",
+        operation_id: operationId,
+      },
+    });
+    expect(goalCommand([
+      "resume",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-B",
+      "--role", "FOREMAN",
+      "--thread", projected.identity.thread_id,
+      "--json",
+    ], repository.root).value).toMatchObject({
+      role: "FOREMAN",
+      task_id: "TASK-B",
+    });
   });
 
   test("rejects active takeover but admits ROLE_LOST and terminal higher-attempt successors", () => {
@@ -3015,7 +3229,7 @@ describe("sealed probe observation receipt", () => {
         },
       },
     );
-    prepareCaptain(
+    const lostPrepared = prepareCaptain(
       lostCase,
       "lost-captain-successor-2",
       "lost",
@@ -3032,6 +3246,35 @@ describe("sealed probe observation receipt", () => {
         attempt: 2,
         thread_id: platformUuid("actual-captain-lost-2"),
       });
+    const lostRegistered = registerPreparedControlIdentity(
+      lostCase.repository,
+      lostCase.artifacts,
+      lostPrepared,
+      {
+        taskId: "TASK-A",
+        role: "CAPTAIN",
+        attempt: 2,
+        authorizerCapabilityFile:
+          String(lostCase.foreman.actor_capability_file),
+      },
+    );
+    expect(lostRegistered.session).toMatchObject({
+      role: "CAPTAIN",
+      thread_id: lostPrepared.identity.thread_id,
+      host_id: lostPrepared.identity.host_id,
+      attempt: 2,
+      role_identity: {
+        operation_id: "lost-captain-successor-2",
+      },
+    });
+    expect(goalCommand([
+      "resume",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--thread", lostPrepared.identity.thread_id,
+      "--json",
+    ], lostCase.repository.root).value.role).toBe("CAPTAIN");
 
     const terminalCase = setup();
     const controlEventId = "terminal-captain-control-1";
@@ -3071,7 +3314,7 @@ describe("sealed probe observation receipt", () => {
         loaded.snapshot.tasks["TASK-A"].sessions.CAPTAIN.status
       ),
     )).toBe("terminal");
-    prepareCaptain(
+    const terminalPrepared = prepareCaptain(
       terminalCase,
       "terminal-captain-successor-2",
       "terminal",
@@ -3088,6 +3331,35 @@ describe("sealed probe observation receipt", () => {
         attempt: 2,
         thread_id: platformUuid("actual-captain-terminal-2"),
       });
+    const terminalRegistered = registerPreparedControlIdentity(
+      terminalCase.repository,
+      terminalCase.artifacts,
+      terminalPrepared,
+      {
+        taskId: "TASK-A",
+        role: "CAPTAIN",
+        attempt: 2,
+        authorizerCapabilityFile:
+          String(terminalCase.foreman.actor_capability_file),
+      },
+    );
+    expect(terminalRegistered.session).toMatchObject({
+      role: "CAPTAIN",
+      thread_id: terminalPrepared.identity.thread_id,
+      host_id: terminalPrepared.identity.host_id,
+      attempt: 2,
+      role_identity: {
+        operation_id: "terminal-captain-successor-2",
+      },
+    });
+    expect(goalCommand([
+      "resume",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--thread", terminalPrepared.identity.thread_id,
+      "--json",
+    ], terminalCase.repository.root).value.role).toBe("CAPTAIN");
   });
 
   test("runs signed identity prepare and repeated zero-write reads through the real goalctl process", () => {

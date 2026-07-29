@@ -1297,6 +1297,11 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
     'manifest 未启用 probe observation receipts',
   );
+  assertControl(
+    loaded.meta.role_identity_protocol_version === 2,
+    'ROLE_IDENTITY_PROTOCOL_MIGRATION_REQUIRED',
+    'role identity intent producer 只接受 fresh v2 init；旧 Goal 必须先完成 audited migration',
+  );
   const state = loaded.snapshot.tasks[options.taskId];
   assertControl(state, 'UNKNOWN_TASK', `未知 task ${options.taskId}`);
   const operationId = safeId(options.eventId, 'registration event_id');
@@ -3366,6 +3371,7 @@ function loadGoalFiles(root, goalId, options = {}) {
   assertControl(meta.goal_id === goalId && meta.schema_version === 1, 'CORRUPT_STORE', 'goal metadata 身份不匹配');
   assertControl(
     meta.role_identity_protocol_version === undefined
+      || meta.role_identity_protocol_version === 1
       || meta.role_identity_protocol_version === 2,
     'CORRUPT_STORE',
     'goal metadata role identity protocol version 非法',
