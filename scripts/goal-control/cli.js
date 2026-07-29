@@ -169,6 +169,13 @@ function goalCommand(
       'worker_bootstrap_identity_plan_sha256',
       'worker_thread',
       'worker_host',
+      'captain_bootstrap_receipt',
+      'captain_bootstrap_receipt_sha256',
+      'captain_bootstrap_operation_id',
+      'captain_bootstrap_challenge',
+      'captain_bootstrap_identity_plan_sha256',
+      'captain_thread',
+      'captain_host',
     ]);
     assertStrictCommandArguments(command, args, argv, allowed);
     return {
@@ -208,6 +215,35 @@ function goalCommand(
         workerHost: args.worker_host === undefined
           ? null
           : requireArg(args, 'worker_host'),
+        captainBootstrapReceipt:
+          args.captain_bootstrap_receipt === undefined
+            ? null
+            : requireArg(args, 'captain_bootstrap_receipt'),
+        captainBootstrapReceiptSha256:
+          args.captain_bootstrap_receipt_sha256 === undefined
+            ? null
+            : requireArg(args, 'captain_bootstrap_receipt_sha256'),
+        captainBootstrapOperationId:
+          args.captain_bootstrap_operation_id === undefined
+            ? null
+            : requireArg(args, 'captain_bootstrap_operation_id'),
+        captainBootstrapChallenge:
+          args.captain_bootstrap_challenge === undefined
+            ? null
+            : requireArg(args, 'captain_bootstrap_challenge'),
+        captainBootstrapIdentityPlanSha256:
+          args.captain_bootstrap_identity_plan_sha256 === undefined
+            ? null
+            : requireArg(
+              args,
+              'captain_bootstrap_identity_plan_sha256',
+            ),
+        captainThread: args.captain_thread === undefined
+          ? null
+          : requireArg(args, 'captain_thread'),
+        captainHost: args.captain_host === undefined
+          ? null
+          : requireArg(args, 'captain_host'),
       }, {}, invocationCwd),
       exitCode: 0,
     };
@@ -469,6 +505,16 @@ function goalCommand(
         args.worker_bootstrap_challenge || null,
       workerBootstrapIdentityPlanSha256:
         args.worker_bootstrap_identity_plan_sha256 || null,
+      captainBootstrapReceipt:
+        args.captain_bootstrap_receipt || null,
+      captainBootstrapReceiptSha256:
+        args.captain_bootstrap_receipt_sha256 || null,
+      captainBootstrapOperationId:
+        args.captain_bootstrap_operation_id || null,
+      captainBootstrapChallenge:
+        args.captain_bootstrap_challenge || null,
+      captainBootstrapIdentityPlanSha256:
+        args.captain_bootstrap_identity_plan_sha256 || null,
       invocationCwd,
     });
     return { value, exitCode: 0 };

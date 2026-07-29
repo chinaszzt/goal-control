@@ -10,6 +10,7 @@ const {
 } = require('./canary-controller-attestation');
 const {
   BOOTSTRAP_PLAN_KIND,
+  CAPTAIN_BOOTSTRAP_PLAN_KIND,
   identityPlanOutput,
 } = require('./canary-bootstrap-identity-plan');
 const { ControlError, assertControl } = require('./errors');
@@ -25,10 +26,11 @@ const {
   recoverPrivateJsonPublication,
 } = require('./canary-bootstrap-artifacts');
 const {
-  validateWorkerBootstrapReceipt: validateWorkerBootstrapReceiptCore,
+  validateBootstrapReceipt: validateBootstrapReceiptCore,
 } = require('./canary-bootstrap-receipt');
 const {
   assertFullSha,
+  assertIsolatedTestMode,
   canonicalJson,
   controlRoot,
   hashObject,
@@ -40,6 +42,7 @@ const {
   trustedGitExecutable,
 } = require('./util');
 const {
+  CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
   WORKER_CANARY_BOOTSTRAP_PROTOCOL,
   validateManifest,
 } = require('./validation');
@@ -53,6 +56,36 @@ const WORKER_ROLES = Object.freeze(['DEV', 'REVIEW', 'RECEIPT']);
 const BOOTSTRAP_OBSERVATION_KIND = 'WORKER_CANARY_IDENTITY_OBSERVATION';
 const BOOTSTRAP_INTENT_KIND = 'WORKER_CANARY_PREPARE_INTENT';
 const BOOTSTRAP_RECEIPT_KIND = 'WORKER_CANARY_PREPARE_RECEIPT';
+const CAPTAIN_BOOTSTRAP_OBSERVATION_KIND =
+  'CAPTAIN_CANARY_IDENTITY_OBSERVATION';
+const CAPTAIN_BOOTSTRAP_INTENT_KIND =
+  'CAPTAIN_CANARY_PREPARE_INTENT';
+const CAPTAIN_BOOTSTRAP_RECEIPT_KIND =
+  'CAPTAIN_CANARY_PREPARE_RECEIPT';
+const WORKER_BOOTSTRAP_PROFILE = Object.freeze({
+  roleLabel: 'worker',
+  roles: WORKER_ROLES,
+  manifestKey: 'worker_canary_bootstrap',
+  protocol: WORKER_CANARY_BOOTSTRAP_PROTOCOL,
+  planKind: BOOTSTRAP_PLAN_KIND,
+  observationKind: BOOTSTRAP_OBSERVATION_KIND,
+  intentKind: BOOTSTRAP_INTENT_KIND,
+  receiptKind: BOOTSTRAP_RECEIPT_KIND,
+  artifactDirectory: 'worker-canary-bootstrap-v1',
+  outputPrefix: 'worker',
+});
+const CAPTAIN_BOOTSTRAP_PROFILE = Object.freeze({
+  roleLabel: 'captain',
+  roles: Object.freeze(['CAPTAIN']),
+  manifestKey: 'captain_canary_bootstrap',
+  protocol: CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL,
+  planKind: CAPTAIN_BOOTSTRAP_PLAN_KIND,
+  observationKind: CAPTAIN_BOOTSTRAP_OBSERVATION_KIND,
+  intentKind: CAPTAIN_BOOTSTRAP_INTENT_KIND,
+  receiptKind: CAPTAIN_BOOTSTRAP_RECEIPT_KIND,
+  artifactDirectory: 'captain-canary-bootstrap-v1',
+  outputPrefix: 'captain',
+});
 const REPO_PATH_RE =
   /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\/\/)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const CHALLENGE_RE = /^[0-9a-f]{64}$/;
@@ -78,6 +111,25 @@ const HEAD_TRANSACTION_CODES = Object.freeze({
   lockConflict: 'CANARY_BOOTSTRAP_GIT_LOCK_CONFLICT',
   targetRef: 'CANARY_BOOTSTRAP_BRANCH_CONFLICT',
 });
+
+function maybeCaptainBootstrapFault(
+  capture,
+  cwd,
+  environmentName,
+  code,
+) {
+  if (capture.bootstrapProfile !== CAPTAIN_BOOTSTRAP_PROFILE) return;
+  const mode = process.env[environmentName];
+  if (mode === undefined || mode === '') return;
+  assertControl(
+    ['1', 'throw', 'exit'].includes(mode),
+    'INVALID_TEST_FAULT',
+    `${environmentName} 只能是 1/throw/exit`,
+  );
+  assertIsolatedTestMode(cwd);
+  if (mode === 'exit') process.exit(86);
+  throw new ControlError(code, `injected ${environmentName} fault`);
+}
 
 function gitResult(cwd, args, options = {}) {
   try {
@@ -374,7 +426,115 @@ function committedManifestInputs(manifest) {
       'worker_canary_bootstrap.policy',
     );
   }
+  if (manifest.captain_canary_bootstrap) {
+    inputs.set(
+      manifest.captain_canary_bootstrap.policy.path,
+      'captain_canary_bootstrap.policy',
+    );
+  }
   return inputs;
+}
+
+function bootstrapProfileForRole(role) {
+  if (WORKER_ROLES.includes(role)) return WORKER_BOOTSTRAP_PROFILE;
+  if (role === 'CAPTAIN') return CAPTAIN_BOOTSTRAP_PROFILE;
+  assertControl(
+    false,
+    'CANARY_BOOTSTRAP_ROLE_INVALID',
+    'canary bootstrap 只适用于 CAPTAIN/DEV/REVIEW/RECEIPT',
+  );
+}
+
+function captainRequiredStartHeadFromGoal(
+  loaded,
+  selectedTask,
+  deriveMechanicalP1Head,
+) {
+  const state = loaded.snapshot.tasks[selectedTask.id];
+  assertControl(
+    state,
+    'CAPTAIN_BOOTSTRAP_GOAL_STATE_INVALID',
+    `Goal state 缺 task ${selectedTask.id}`,
+  );
+  let source;
+  let requiredStartHead;
+  if (!selectedTask.p1) {
+    requiredStartHead = state.full_head;
+    source = {
+      kind: 'TASK_FULL_HEAD',
+      task_full_head: state.full_head,
+    };
+  } else if (selectedTask.dependencies.length === 0) {
+    requiredStartHead = deriveMechanicalP1Head(loaded, selectedTask);
+    source = {
+      kind: 'GOAL_INPUT_HEAD',
+      goal_input_head: loaded.meta.goal_input_head,
+    };
+  } else {
+    const byId = new Map(
+      loaded.manifest.tasks.map((task) => [task.id, task]),
+    );
+    const dependency = [...selectedTask.dependencies]
+      .map((dependencyId) => byId.get(dependencyId))
+      .sort(
+        (left, right) =>
+          left.integration_order - right.integration_order,
+      )
+      .at(-1);
+    const dependencyState = dependency
+      && loaded.snapshot.tasks[dependency.id];
+    requiredStartHead = deriveMechanicalP1Head(loaded, selectedTask);
+    source = {
+      kind: 'DEPENDENCY_MAIN_MERGE',
+      dependency_task_id: dependency && dependency.id,
+      dependency_main_merge_sha:
+        dependencyState
+        && dependencyState.merge
+        && dependencyState.merge.main_merge_sha,
+    };
+  }
+  assertFullSha(
+    requiredStartHead,
+    `CAPTAIN ${selectedTask.id} required start HEAD`,
+  );
+  return {
+    schema_version: 1,
+    goal_id: loaded.manifest.goal_id,
+    task_id: selectedTask.id,
+    control_epoch: loaded.control.epoch,
+    state_revision: state.state_revision,
+    task_cycle: state.task_cycle,
+    required_start_head: requiredStartHead,
+    source,
+  };
+}
+
+function loadCaptainRequiredStartHeadProof(
+  repositoryRoot,
+  manifest,
+  selectedTask,
+) {
+  // Lazy loading avoids the goal -> canary-bootstrap module cycle during
+  // controller startup; this path runs only after both modules are initialized.
+  const {
+    loadGoalStateReadOnly,
+    mechanicalP1RequiredStartHead,
+  } = require('./goal');
+  const loaded = loadGoalStateReadOnly(
+    repositoryRoot,
+    manifest.goal_id,
+    (goal) => goal,
+  );
+  assertControl(
+    loaded.manifest.manifest_sha256 === manifest.manifest_sha256,
+    'CAPTAIN_BOOTSTRAP_GOAL_STATE_INVALID',
+    'Goal state sealed manifest 与 bootstrap manifest 不一致',
+  );
+  return captainRequiredStartHeadFromGoal(
+    loaded,
+    selectedTask,
+    mechanicalP1RequiredStartHead,
+  );
 }
 
 function deriveWorkerBranch(goalId, taskId, role, operationId) {
@@ -433,11 +593,7 @@ function captureBootstrapInputs(cwd, options) {
     'CANARY_BOOTSTRAP_INPUT_INVALID',
     'validated manifest path 与 --manifest 不一致',
   );
-  assertControl(
-    WORKER_ROLES.includes(options.role),
-    'CANARY_BOOTSTRAP_ROLE_INVALID',
-    'canary bootstrap 只适用于 DEV/REVIEW/RECEIPT',
-  );
+  const bootstrapProfile = bootstrapProfileForRole(options.role);
   const selectedTask = manifest.tasks.find(
     (task) => task.id === options.taskId,
   );
@@ -447,11 +603,13 @@ function captureBootstrapInputs(cwd, options) {
     `manifest 中不存在 task: ${options.taskId}`,
   );
   assertControl(
-    manifest.worker_canary_bootstrap
-      && manifest.worker_canary_bootstrap.protocol
-        === WORKER_CANARY_BOOTSTRAP_PROTOCOL,
-    'WORKER_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
-    `manifest 未显式启用 ${WORKER_CANARY_BOOTSTRAP_PROTOCOL}`,
+    manifest[bootstrapProfile.manifestKey]
+      && manifest[bootstrapProfile.manifestKey].protocol
+        === bootstrapProfile.protocol,
+    bootstrapProfile === WORKER_BOOTSTRAP_PROFILE
+      ? 'WORKER_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED'
+      : 'CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
+    `manifest 未显式启用 ${bootstrapProfile.protocol}`,
   );
   const expectedHead = assertFullSha(
     options.expectedHead,
@@ -466,6 +624,19 @@ function captureBootstrapInputs(cwd, options) {
     'CANARY_BOOTSTRAP_HEAD_INVALID',
     `expected worker HEAD 不存在: ${expectedHead}`,
   );
+  let requiredStartHeadProof = null;
+  if (bootstrapProfile === CAPTAIN_BOOTSTRAP_PROFILE) {
+    requiredStartHeadProof = loadCaptainRequiredStartHeadProof(
+      repositoryRoot,
+      manifest,
+      selectedTask,
+    );
+    assertControl(
+      expectedHead === requiredStartHeadProof.required_start_head,
+      'CAPTAIN_BOOTSTRAP_REQUIRED_HEAD_MISMATCH',
+      `CAPTAIN bootstrap expected HEAD ${expectedHead} 与 Goal-state required start HEAD ${requiredStartHeadProof.required_start_head} 不一致`,
+    );
+  }
   safeId(options.operationId, '--operation-id');
   assertControl(
     CHALLENGE_RE.test(options.challenge),
@@ -481,17 +652,19 @@ function captureBootstrapInputs(cwd, options) {
       relative,
       label,
     );
-    const expected = committedFileAt(
-      repositoryRoot,
-      expectedHead,
-      relative,
-      `${label} at expected worker HEAD`,
-    );
-    assertControl(
-      expected.sha256 === current.sha256,
-      'CANARY_BOOTSTRAP_HEAD_INPUT_MISMATCH',
-      `${label} 在 frozen HEAD 与 expected worker HEAD 的 bytes 不一致`,
-    );
+    if (bootstrapProfile === WORKER_BOOTSTRAP_PROFILE) {
+      const expected = committedFileAt(
+        repositoryRoot,
+        expectedHead,
+        relative,
+        `${label} at expected worker HEAD`,
+      );
+      assertControl(
+        expected.sha256 === current.sha256,
+        'CANARY_BOOTSTRAP_HEAD_INPUT_MISMATCH',
+        `${label} 在 frozen HEAD 与 expected worker HEAD 的 bytes 不一致`,
+      );
+    }
     captures.set(relative, current);
   }
   assertControl(
@@ -509,9 +682,9 @@ function captureBootstrapInputs(cwd, options) {
     '--canary-policy-sha256',
   );
   assertControl(
-    policyPath === manifest.worker_canary_bootstrap.policy.path
+    policyPath === manifest[bootstrapProfile.manifestKey].policy.path
       && policySha256
-        === manifest.worker_canary_bootstrap.policy.sha256,
+        === manifest[bootstrapProfile.manifestKey].policy.sha256,
     'CANARY_BOOTSTRAP_POLICY_MISMATCH',
     'canary policy path/hash 与 manifest worker bootstrap opt-in 不一致',
   );
@@ -521,15 +694,20 @@ function captureBootstrapInputs(cwd, options) {
     policyPath,
     'canary policy',
   );
-  const expectedPolicy = committedFileAt(
-    repositoryRoot,
-    expectedHead,
-    policyPath,
-    'canary policy at expected worker HEAD',
-  );
+  const expectedPolicy = bootstrapProfile === WORKER_BOOTSTRAP_PROFILE
+    ? committedFileAt(
+      repositoryRoot,
+      expectedHead,
+      policyPath,
+      'canary policy at expected worker HEAD',
+    )
+    : null;
   assertControl(
     policy.sha256 === policySha256
-      && expectedPolicy.sha256 === policySha256,
+      && (
+        expectedPolicy === null
+          || expectedPolicy.sha256 === policySha256
+      ),
     'CANARY_BOOTSTRAP_POLICY_MISMATCH',
     'canary policy path/hash 未同时绑定 frozen 与 expected worker HEAD',
   );
@@ -568,6 +746,8 @@ function captureBootstrapInputs(cwd, options) {
     policyPath,
     policySha256,
     workerBranch,
+    bootstrapProfile,
+    requiredStartHeadProof,
   };
 }
 
@@ -900,7 +1080,7 @@ function inspectWorkerIdentity(cwd, capture, options, planOutput) {
   const identity = inspectWorkerWorktree(cwd, capture);
   const observation = {
     schema_version: 1,
-    kind: BOOTSTRAP_OBSERVATION_KIND,
+    kind: capture.bootstrapProfile.observationKind,
     identity_plan_sha256: planOutput.identity_plan_sha256,
     goal_id: capture.manifest.goal_id,
     task_id: capture.selectedTask.id,
@@ -950,8 +1130,13 @@ function bootstrapArtifactPaths(capture, operationId) {
   assertArtifactPathSegment(capture.selectedTask.id, 'task_id');
   safeId(operationId, 'operation_id');
   const root = path.join(
-    path.dirname(controlRoot(capture.repositoryRoot)),
-    'worker-canary-bootstrap-v1',
+    capture.bootstrapProfile === CAPTAIN_BOOTSTRAP_PROFILE
+      ? capture.commonGitDir
+      : path.dirname(controlRoot(capture.repositoryRoot)),
+    ...(capture.bootstrapProfile === CAPTAIN_BOOTSTRAP_PROFILE
+      ? ['goal-control']
+      : []),
+    capture.bootstrapProfile.artifactDirectory,
   );
   const operationHash = sha256(operationId);
   const operationDirectory = path.join(
@@ -1087,6 +1272,12 @@ function attachWorkerBranch(capture, intent, paths) {
       'CANARY_BOOTSTRAP_BRANCH_CONFLICT',
       'deterministic worker branch CAS 未收敛到 expected HEAD',
     );
+    maybeCaptainBootstrapFault(
+      capture,
+      current.cwd,
+      'GOAL_CONTROL_TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_REF',
+      'TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_REF',
+    );
   } else {
     assertControl(
       current.branch === capture.workerBranch
@@ -1112,6 +1303,12 @@ function attachWorkerBranch(capture, intent, paths) {
     targetRef: ref,
     codes: HEAD_TRANSACTION_CODES,
   });
+  maybeCaptainBootstrapFault(
+    capture,
+    current.cwd,
+    'GOAL_CONTROL_TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_HEAD',
+    'TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_HEAD',
+  );
   current = inspectWorkerWorktree(
     intent.worker_observation.cwd,
     capture,
@@ -1155,7 +1352,7 @@ function assertIntentMatchesRequest(intent, request) {
   assertControl(
     intent
       && intent.schema_version === 1
-      && intent.kind === BOOTSTRAP_INTENT_KIND
+      && intent.kind === request.kind
       && requestSha256 === hashObject(unsigned)
       && requestSha256 === hashObject(request),
     'CANARY_BOOTSTRAP_OPERATION_CONFLICT',
@@ -1196,20 +1393,69 @@ function canaryBootstrapPrepare(cwd, options) {
   const planOutput = identityPlanOutput(capture, options);
   assertIdentityPlanHash(planOutput, options.expectedIdentityPlanSha256);
   const paths = bootstrapArtifactPaths(capture, options.operationId);
-  assertPrivateDirectory(paths.root, 'worker canary bootstrap root', true);
+  const expectedObservationSha256 = normalizeHash(
+    options.expectedObservationSha256,
+    '--expected-observation-sha256',
+  );
+  let captainFreshObservation = null;
+  if (
+    capture.bootstrapProfile === CAPTAIN_BOOTSTRAP_PROFILE
+      && !pathEntryPresent(paths.intent, 'captain bootstrap intent')
+  ) {
+    const current = inspectWorkerIdentity(
+      workerWorktree,
+      capture,
+      {
+        ...options,
+        expectedIdentityPlanSha256:
+          planOutput.identity_plan_sha256,
+        workerThread: options.workerThread,
+        workerHost: options.workerHost,
+      },
+      planOutput,
+    );
+    assertControl(
+      current.identity_observation_sha256
+        === expectedObservationSha256,
+      'CANARY_BOOTSTRAP_OBSERVATION_MISMATCH',
+      'captain identity observation 与 expected hash 不匹配',
+    );
+    captainFreshObservation = current.identity_observation;
+    const initialRef = parseRef(
+      workerWorktree,
+      `refs/heads/${capture.workerBranch}`,
+    );
+    assertBranchNotOccupiedElsewhere(
+      capture,
+      captainFreshObservation.cwd,
+      capture.workerBranch,
+    );
+    assertControl(
+      captainFreshObservation.branch === null
+        && initialRef === null,
+      'CANARY_BOOTSTRAP_BRANCH_CONFLICT',
+      '首次 CAPTAIN prepare 只接受 detached HEAD + absent deterministic ref',
+    );
+    assertNoForeignLocks(
+      captainFreshObservation.git_dir,
+      captainFreshObservation.common_git_dir,
+      capture.workerBranch,
+    );
+  }
+  assertPrivateDirectory(
+    paths.root,
+    `${capture.bootstrapProfile.roleLabel} canary bootstrap root`,
+    true,
+  );
   assertPrivateDirectory(
     paths.operationDirectory,
-    'worker canary bootstrap operation',
+    `${capture.bootstrapProfile.roleLabel} canary bootstrap operation`,
     true,
   );
   recoverPrivateJsonPublication(
     paths.intent,
     'worker canary bootstrap intent',
     'CANARY_BOOTSTRAP_OPERATION_CONFLICT',
-  );
-  const expectedObservationSha256 = normalizeHash(
-    options.expectedObservationSha256,
-    '--expected-observation-sha256',
   );
   let existingIntent = null;
   if (pathEntryPresent(paths.intent, 'worker bootstrap intent')) {
@@ -1231,29 +1477,33 @@ function canaryBootstrapPrepare(cwd, options) {
     );
     observation = existingIntent.value.worker_observation;
   } else {
-    const current = inspectWorkerIdentity(
-      workerWorktree,
-      capture,
-      {
-        ...options,
-        expectedIdentityPlanSha256:
-          planOutput.identity_plan_sha256,
-        workerThread: options.workerThread,
-        workerHost: options.workerHost,
-      },
-      planOutput,
-    );
-    assertControl(
-      current.identity_observation_sha256
-        === expectedObservationSha256,
-      'CANARY_BOOTSTRAP_OBSERVATION_MISMATCH',
-      'worker identity observation 与 expected hash 不匹配',
-    );
-    observation = current.identity_observation;
+    if (captainFreshObservation) {
+      observation = captainFreshObservation;
+    } else {
+      const current = inspectWorkerIdentity(
+        workerWorktree,
+        capture,
+        {
+          ...options,
+          expectedIdentityPlanSha256:
+            planOutput.identity_plan_sha256,
+          workerThread: options.workerThread,
+          workerHost: options.workerHost,
+        },
+        planOutput,
+      );
+      assertControl(
+        current.identity_observation_sha256
+          === expectedObservationSha256,
+        'CANARY_BOOTSTRAP_OBSERVATION_MISMATCH',
+        'worker identity observation 与 expected hash 不匹配',
+      );
+      observation = current.identity_observation;
+    }
   }
   const request = {
     schema_version: 1,
-    kind: BOOTSTRAP_INTENT_KIND,
+    kind: capture.bootstrapProfile.intentKind,
     identity_plan_sha256: planOutput.identity_plan_sha256,
     identity_observation_sha256: expectedObservationSha256,
     goal_id: capture.manifest.goal_id,
@@ -1303,6 +1553,12 @@ function canaryBootstrapPrepare(cwd, options) {
       'worker canary bootstrap intent',
       'CANARY_BOOTSTRAP_OPERATION_CONFLICT',
     );
+    maybeCaptainBootstrapFault(
+      capture,
+      workerWorktree,
+      'GOAL_CONTROL_TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_INTENT',
+      'TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_INTENT',
+    );
   }
 
   const intentRecord = parsePrivateJson(
@@ -1317,7 +1573,7 @@ function canaryBootstrapPrepare(cwd, options) {
   );
   const receiptUnsigned = {
     schema_version: 1,
-    kind: BOOTSTRAP_RECEIPT_KIND,
+    kind: capture.bootstrapProfile.receiptKind,
     identity_plan: planOutput.identity_plan,
     identity_plan_sha256: planOutput.identity_plan_sha256,
     identity_observation_sha256: expectedObservationSha256,
@@ -1368,6 +1624,12 @@ function canaryBootstrapPrepare(cwd, options) {
     'worker canary bootstrap receipt',
     'CANARY_BOOTSTRAP_RECEIPT_CONFLICT',
   );
+  maybeCaptainBootstrapFault(
+    capture,
+    workerWorktree,
+    'GOAL_CONTROL_TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_RECEIPT',
+    'TEST_FAULT_AFTER_CAPTAIN_BOOTSTRAP_RECEIPT',
+  );
   const sealed = parsePrivateJson(
     paths.receipt,
     'worker canary bootstrap receipt',
@@ -1380,8 +1642,10 @@ function canaryBootstrapPrepare(cwd, options) {
   );
   assertControllerProvenanceStable(capture.controller);
   return {
-    worker_bootstrap_receipt_file: paths.receipt,
-    worker_bootstrap_receipt_sha256: sealed.sha256,
+    [`${capture.bootstrapProfile.outputPrefix}_bootstrap_receipt_file`]:
+      paths.receipt,
+    [`${capture.bootstrapProfile.outputPrefix}_bootstrap_receipt_sha256`]:
+      sealed.sha256,
     identity_plan_sha256: planOutput.identity_plan_sha256,
     identity_observation_sha256: expectedObservationSha256,
     intent_sha256: intentRecord.sha256,
@@ -1391,21 +1655,46 @@ function canaryBootstrapPrepare(cwd, options) {
 }
 
 function validateWorkerBootstrapReceipt(options) {
-  return validateWorkerBootstrapReceiptCore(options, {
+  assertControl(
+    WORKER_ROLES.includes(options.role),
+    'CANARY_BOOTSTRAP_ROLE_INVALID',
+    'worker bootstrap receipt 只适用于 worker role',
+  );
+  return validateBootstrapReceiptCore(options, {
     assertBranchNotOccupiedElsewhere,
     inspectWorkerWorktree,
     repositoryCommonGitDir,
     verifyWorktreeBootstrapHead,
-  });
+  }, WORKER_BOOTSTRAP_PROFILE);
+}
+
+function validateCaptainBootstrapReceipt(options) {
+  assertControl(
+    options.role === 'CAPTAIN',
+    'CANARY_BOOTSTRAP_ROLE_INVALID',
+    'captain bootstrap receipt 只适用于 CAPTAIN',
+  );
+  return validateBootstrapReceiptCore(options, {
+    assertBranchNotOccupiedElsewhere,
+    inspectWorkerWorktree,
+    repositoryCommonGitDir,
+    verifyWorktreeBootstrapHead,
+  }, CAPTAIN_BOOTSTRAP_PROFILE);
 }
 
 module.exports = {
   BOOTSTRAP_INTENT_KIND,
   BOOTSTRAP_PLAN_KIND,
   BOOTSTRAP_RECEIPT_KIND,
+  CAPTAIN_BOOTSTRAP_INTENT_KIND,
+  CAPTAIN_BOOTSTRAP_PLAN_KIND,
+  CAPTAIN_BOOTSTRAP_RECEIPT_KIND,
   WORKER_ROLES,
   canaryBootstrapInspect,
   canaryBootstrapPlan,
   canaryBootstrapPrepare,
+  validateCaptainBootstrapReceipt,
   validateWorkerBootstrapReceipt,
+  captainRequiredStartHeadFromGoal,
+  loadCaptainRequiredStartHeadProof,
 };

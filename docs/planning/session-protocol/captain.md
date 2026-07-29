@@ -58,6 +58,27 @@ event/request/key 会 transaction mismatch，错误/替代 capability 会 capabi
 
 ## 2. 启动与恢复
 
+manifest 以
+`captain_canary_bootstrap.protocol=goalctl-captain-canary-bootstrap-v1` 和 committed
+policy exact marker 显式 opt in 时，本角色先以 `IDENTITY_ONLY` 创建。它只从 actual
+process cwd 执行 plan 生成的 inspect template并回报 thread/host/canonical
+cwd/gitdir/common-dir/HEAD/detached/clean observation；不得自行 `git switch`、登记角色、
+接受 capability、运行 Goal event 或请求用户处理 Allow。FOREMAN 用 durable exact
+request 运行 prepare，controller 以 CAS 创建 deterministic non-base branch、attach HEAD
+并 seal 0600 receipt。第一条 follow-up 只能是 receipt-bound `CANARY_EXECUTE`；任何
+interactive Allow/auth 都是 fail-closed。
+
+full canary PASS 后，FOREMAN 必须从同一 actual cwd 用完整 `--captain-bootstrap-*`
+binding 登记本 CAPTAIN。registration response loss 只允许同 event/request/authority
+exact retry。随后 `START_P1` 会重新验证同一 receipt、thread/host、cwd/gitdir/common-dir、
+branch 和 required HEAD；receipt missing/variant、manual pre-attach、occupied branch、
+dirty/wrong/racing HEAD 全部 zero-write 拒绝。旧 worker-v1 protocol/marker 继续不接受
+CAPTAIN；bootstrap plan 也必须在任何 ref/receipt 发布前从 sealed Goal state 证明
+expected HEAD：首个 P1=`goal_input_head`、后继 P1=dependency `main_merge_sha`、
+无 mechanical `p1` 配置=`state.full_head`，不能以 frozen worktree 当前 HEAD 代替。
+`START_P1` 仍重验相同 receipt。该 route 不放宽 named
+non-base branch、clean worktree 或任何 P1 边界。
+
 以下步骤只适用于已通过独立 capability canary、已被 FOREMAN 登记并收到 `ACTIVE` 消息的
 CAPTAIN。初始 `CANARY_ONLY` 阶段不得运行 `goalctl resume/event`、接受 capability 或
 开始 P1；失败时不登记，由 FOREMAN 保留 `BLOCKED_TOOLING` 摘要。

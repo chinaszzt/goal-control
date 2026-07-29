@@ -111,8 +111,17 @@ const {
   controllerProvenanceCapture,
 } = require('./canary-controller-attestation');
 const {
+  captainRequiredStartHeadFromGoal,
+  validateCaptainBootstrapReceipt,
   validateWorkerBootstrapReceipt,
 } = require('./canary-bootstrap');
+const {
+  captainBootstrapOptions,
+  captainBootstrapRequestMatchesBinding,
+  registrationRequiresCaptainBootstrap,
+  sealCaptainBootstrapBinding,
+  validateCaptainBootstrapBinding,
+} = require('./captain-bootstrap-binding');
 const {
   assertWorkerBootstrapCurrentWorktree,
   assertWorkerBootstrapLaunchBinding,
@@ -801,6 +810,84 @@ function registrationWorkerBootstrapBinding(loaded, state, options) {
   return sealWorkerBootstrapBinding(receipt);
 }
 
+function registrationCaptainBootstrapBinding(loaded, state, options) {
+  const request = captainBootstrapOptions(options);
+  const required = registrationRequiresCaptainBootstrap(
+    loaded.manifest,
+    options.role,
+  );
+  assertControl(
+    !required || request !== null,
+    'CAPTAIN_BOOTSTRAP_REGISTRATION_REQUIRED',
+    'manifest 启用 captain canary bootstrap 后，CAPTAIN registration 必须携带同一 receipt/hash/operation/challenge/plan',
+  );
+  assertControl(
+    required || request === null,
+    'CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
+    '当前 manifest/role 不接受 captain bootstrap registration binding',
+  );
+  if (request === null) return null;
+
+  const repositoryRoot = assertFrozenInputs(
+    options.repositoryWorktree,
+    loaded,
+    options.taskId,
+  );
+  const controller = controllerProvenanceCapture();
+  const sourceManifest = path.resolve(
+    repositoryRoot,
+    loaded.manifest.source_manifest,
+  );
+  const manifestTask = loaded.manifest.tasks.find(
+    (candidate) => candidate.id === options.taskId,
+  );
+  assertControl(
+    manifestTask,
+    'UNKNOWN_TASK',
+    `manifest 缺 task ${options.taskId}`,
+  );
+  const requiredStartHeadProof = captainRequiredStartHeadFromGoal(
+    loaded,
+    manifestTask,
+    mechanicalP1RequiredStartHead,
+  );
+  const receipt = validateCaptainBootstrapReceipt({
+    receiptFile: request.receipt_file,
+    expectedReceiptSha256: request.receipt_sha256,
+    expectedOperationId: request.operation_id,
+    expectedChallenge: request.challenge,
+    expectedIdentityPlanSha256: request.identity_plan_sha256,
+    workerThread: options.threadId,
+    workerHost: options.hostId || 'local',
+    invocationCwd: options.invocationCwd,
+    controller: controller.provenance,
+    repositoryRoot,
+    repositoryHead: git(repositoryRoot, ['rev-parse', 'HEAD']),
+    manifestPath: loaded.manifest.source_manifest,
+    manifestSha256: hashFile(sourceManifest),
+    validatedManifestSha256: loaded.manifest.manifest_sha256,
+    repositoryNameWithOwner:
+      loaded.manifest.repository.name_with_owner,
+    baseBranch: loaded.manifest.repository.base_branch,
+    goalId: loaded.manifest.goal_id,
+    taskId: options.taskId,
+    role: options.role,
+    canaryPolicy: loaded.manifest.captain_canary_bootstrap.policy,
+    requiredStartHeadProof,
+  });
+  const requiredCaptainHead = manifestTask && manifestTask.p1
+    ? mechanicalP1RequiredStartHead(loaded, manifestTask)
+    : state.full_head;
+  assertControl(
+    requiredCaptainHead
+      && receipt.head === requiredCaptainHead,
+    'CAPTAIN_BOOTSTRAP_REGISTRATION_HEAD_MISMATCH',
+    `captain bootstrap HEAD ${receipt.head} 与 required start HEAD ${requiredCaptainHead} 不一致`,
+  );
+  assertControllerProvenanceStable(controller);
+  return sealCaptainBootstrapBinding(receipt);
+}
+
 function registrationTransactionKey(options) {
   const goalId = safeId(options.goalId, 'goal_id');
   const taskId = safeId(options.taskId, 'task_id');
@@ -821,6 +908,9 @@ function registrationTransactionKey(options) {
     authorizer_thread_id: options.authorizerThreadId || null,
     ...(workerBootstrapOptions(options)
       ? { worker_bootstrap: workerBootstrapOptions(options) }
+      : {}),
+    ...(captainBootstrapOptions(options)
+      ? { captain_bootstrap: captainBootstrapOptions(options) }
       : {}),
   };
   return canonicalTransactionKey(
@@ -2860,6 +2950,10 @@ function authorizeRegistrationRetry(root, loaded, state, options, accepted) {
       && workerBootstrapRequestMatchesBinding(
         accepted.payload.worker_bootstrap || null,
         options,
+      )
+      && captainBootstrapRequestMatchesBinding(
+        accepted.payload.captain_bootstrap || null,
+        options,
       ),
     'EVENT_ID_CONFLICT',
     `registration event id ${accepted && accepted.event_id} 已被不同请求使用`,
@@ -3497,6 +3591,10 @@ function registrationIntentMatchesOptions(intent, eventId, options) {
     && request.launch_id === (options.launchId || null)
     && workerBootstrapRequestMatchesBinding(
       request.worker_bootstrap || null,
+      options,
+    )
+    && captainBootstrapRequestMatchesBinding(
+      request.captain_bootstrap || null,
       options,
     );
 }
@@ -4786,6 +4884,97 @@ function committedP1ArtifactInventory(worktree, policy, commit) {
   };
 }
 
+function assertCaptainBootstrapStartP1(
+  loaded,
+  state,
+  checkout,
+  requiredStartHead,
+) {
+  const required = registrationRequiresCaptainBootstrap(
+    loaded.manifest,
+    'CAPTAIN',
+  );
+  const session = state.sessions.CAPTAIN;
+  const stored = session && session.captain_bootstrap;
+  assertControl(
+    !required || stored,
+    'CAPTAIN_BOOTSTRAP_START_P1_REQUIRED',
+    'START_P1 要求 receipt-bound CAPTAIN registration',
+  );
+  assertControl(
+    required || !stored,
+    'CAPTAIN_CANARY_BOOTSTRAP_PROTOCOL_UNSUPPORTED',
+    'legacy Goal 的 START_P1 不接受 captain bootstrap binding',
+  );
+  if (!stored) return;
+
+  const binding = validateCaptainBootstrapBinding(
+    stored,
+    'CAPTAIN session.captain_bootstrap',
+  );
+  assertControl(
+    session.thread_id === binding.thread
+      && session.host_id === binding.host
+      && checkout.canonicalWorktree === binding.worktree
+      && checkout.branch === binding.branch
+      && requiredStartHead === binding.head,
+    'CAPTAIN_BOOTSTRAP_START_P1_MISMATCH',
+    'START_P1 checkout/head/thread/host 与 sealed CAPTAIN binding 不一致',
+  );
+  const repositoryRoot = fs.realpathSync(
+    loaded.meta.repository_root,
+  );
+  const sourceManifest = path.resolve(
+    repositoryRoot,
+    loaded.manifest.source_manifest,
+  );
+  const controller = controllerProvenanceCapture();
+  const manifestTask = loaded.manifest.tasks.find(
+    (candidate) => candidate.id === state.task_id,
+  );
+  assertControl(
+    manifestTask,
+    'CORRUPT_STORE',
+    `manifest 缺 task ${state.task_id}`,
+  );
+  const receipt = validateCaptainBootstrapReceipt({
+    receiptFile: binding.receipt_file,
+    expectedReceiptSha256: binding.receipt_sha256,
+    expectedOperationId: binding.operation_id,
+    expectedChallenge: binding.challenge,
+    expectedIdentityPlanSha256:
+      binding.identity_plan_sha256,
+    workerThread: session.thread_id,
+    workerHost: session.host_id,
+    invocationCwd: checkout.canonicalWorktree,
+    controller: controller.provenance,
+    repositoryRoot,
+    repositoryHead: git(repositoryRoot, ['rev-parse', 'HEAD']),
+    manifestPath: loaded.manifest.source_manifest,
+    manifestSha256: hashFile(sourceManifest),
+    validatedManifestSha256: loaded.manifest.manifest_sha256,
+    repositoryNameWithOwner:
+      loaded.manifest.repository.name_with_owner,
+    baseBranch: loaded.manifest.repository.base_branch,
+    goalId: loaded.manifest.goal_id,
+    taskId: state.task_id,
+    role: 'CAPTAIN',
+    canaryPolicy: loaded.manifest.captain_canary_bootstrap.policy,
+    requiredStartHeadProof: captainRequiredStartHeadFromGoal(
+      loaded,
+      manifestTask,
+      mechanicalP1RequiredStartHead,
+    ),
+  });
+  assertControl(
+    hashObject(sealCaptainBootstrapBinding(receipt))
+      === hashObject(binding),
+    'CAPTAIN_BOOTSTRAP_START_P1_MISMATCH',
+    'START_P1 receipt/live identity 与 registration seal 不一致',
+  );
+  assertControllerProvenanceStable(controller);
+}
+
 function completeMechanicalP1EventPayload(
   cwd,
   loaded,
@@ -4794,11 +4983,16 @@ function completeMechanicalP1EventPayload(
   eventType,
   suppliedPayload = {},
 ) {
-  if (!task.p1) return suppliedPayload;
-  let expected;
-  if (eventType === 'START_P1') {
-    assertMechanicalP1DependenciesArchived(loaded, task);
-    const requiredStartHead = mechanicalP1RequiredStartHead(loaded, task);
+  let startP1Boundary = null;
+  const requiresCaptainStartP1Boundary = task.p1
+    || registrationRequiresCaptainBootstrap(
+      loaded.manifest,
+      'CAPTAIN',
+    );
+  if (eventType === 'START_P1' && requiresCaptainStartP1Boundary) {
+    const requiredStartHead = task.p1
+      ? mechanicalP1RequiredStartHead(loaded, task)
+      : state.full_head;
     assertControl(
       requiredStartHead,
       'P1_START_HEAD_UNAVAILABLE',
@@ -4817,6 +5011,19 @@ function completeMechanicalP1EventPayload(
       'P1_START_WORKTREE_DIRTY',
       'START_P1 只接受 clean linked worktree',
     );
+    assertCaptainBootstrapStartP1(
+      loaded,
+      state,
+      checkout,
+      requiredStartHead,
+    );
+    startP1Boundary = { requiredStartHead, checkout };
+  }
+  if (!task.p1) return suppliedPayload;
+  let expected;
+  if (eventType === 'START_P1') {
+    assertMechanicalP1DependenciesArchived(loaded, task);
+    const { requiredStartHead, checkout } = startP1Boundary;
     expected = {
       required_start_head: requiredStartHead,
       p1_worktree: checkout.canonicalWorktree,
@@ -4936,6 +5143,42 @@ function validateP1Boundary(cwd, loaded, state, event) {
     (candidate) => candidate.id === state.task_id,
   );
   assertControl(manifestTask, 'CORRUPT_STORE', `manifest 缺 task ${state.task_id}`);
+  let startP1Boundary = null;
+  const requiresCaptainStartP1Boundary = manifestTask.p1
+    || registrationRequiresCaptainBootstrap(
+      loaded.manifest,
+      'CAPTAIN',
+    );
+  if (event.type === 'START_P1' && requiresCaptainStartP1Boundary) {
+    const requiredStartHead = manifestTask.p1
+      ? mechanicalP1RequiredStartHead(loaded, manifestTask)
+      : state.full_head;
+    assertControl(
+      requiredStartHead,
+      'P1_START_HEAD_UNAVAILABLE',
+      `${manifestTask.id} 无法解析 required_start_head`,
+    );
+    const checkout = mechanicalP1LinkedCheckout(
+      cwd,
+      loaded,
+      requiredStartHead,
+    );
+    assertControl(
+      git(
+        checkout.worktree,
+        ['status', '--porcelain=v1', '--untracked-files=all'],
+      ) === '',
+      'P1_START_WORKTREE_DIRTY',
+      'START_P1 只接受 clean linked worktree',
+    );
+    assertCaptainBootstrapStartP1(
+      loaded,
+      state,
+      checkout,
+      requiredStartHead,
+    );
+    startP1Boundary = { requiredStartHead, checkout };
+  }
   if (!manifestTask.p1) {
     if (event.type === 'START_P1') return;
     const legacyWorktree = repoRoot(cwd);
@@ -4983,25 +5226,13 @@ function validateP1Boundary(cwd, loaded, state, event) {
   );
   git(worktree, ['cat-file', '-e', `${requiredStartHead}^{commit}`]);
   if (event.type === 'START_P1') {
-    const checkout = mechanicalP1LinkedCheckout(
-      cwd,
-      loaded,
-      requiredStartHead,
-    );
+    const { checkout } = startP1Boundary;
     assertControl(
       event.payload.required_start_head === requiredStartHead
         && event.payload.p1_worktree === checkout.canonicalWorktree
         && event.payload.p1_branch === checkout.branch,
       'P1_START_HEAD_MISMATCH',
       'START_P1 payload 与当前 linked worktree/branch/required head 不一致',
-    );
-    assertControl(
-      git(
-        checkout.worktree,
-        ['status', '--porcelain=v1', '--untracked-files=all'],
-      ) === '',
-      'P1_START_WORKTREE_DIRTY',
-      'START_P1 只接受 clean linked worktree',
     );
     return;
   }
@@ -11441,6 +11672,11 @@ function exactUnsealedRegistrationPreparedRequest(
     state,
     options,
   );
+  const captainBootstrap = registrationCaptainBootstrapBinding(
+    loaded,
+    state,
+    options,
+  );
   const request = {
     schema_version: 1,
     event_id: eventId,
@@ -11455,6 +11691,9 @@ function exactUnsealedRegistrationPreparedRequest(
     launch_id: workerLaunchId,
     ...(workerBootstrap
       ? { worker_bootstrap: workerBootstrap }
+      : {}),
+    ...(captainBootstrap
+      ? { captain_bootstrap: captainBootstrap }
       : {}),
     authorized_by: authorizedBy,
     expected: {
@@ -11802,6 +12041,10 @@ function registerRole(cwd, options) {
             request.worker_bootstrap || null,
             options,
           )
+          && captainBootstrapRequestMatchesBinding(
+            request.captain_bootstrap || null,
+            options,
+          )
           && pendingRegistrationIntent.request_sha256 === hashObject(request),
         'EVENT_ID_CONFLICT',
         `registration intent ${eventId} 已绑定不同请求`,
@@ -11898,6 +12141,9 @@ function registerRole(cwd, options) {
           ...(request.worker_bootstrap
             ? { worker_bootstrap: request.worker_bootstrap }
             : {}),
+          ...(request.captain_bootstrap
+            ? { captain_bootstrap: request.captain_bootstrap }
+            : {}),
           capability_sha256: capability.sha256,
           capability_file: capability.file,
           authorized_by: request.authorized_by,
@@ -11946,6 +12192,11 @@ function registerRole(cwd, options) {
       state,
       options,
     );
+    const captainBootstrap = registrationCaptainBootstrapBinding(
+      loaded,
+      state,
+      options,
+    );
     const existingIsCurrent = existing
       && existing.registered_control_epoch === loaded.control.epoch
       && existing.registered_packet_revision === state.packet.revision
@@ -11971,6 +12222,14 @@ function registerRole(cwd, options) {
         ),
         'REGISTRATION_IDEMPOTENCY_MISMATCH',
         '重复 registration worker bootstrap binding 不一致',
+      );
+      assertControl(
+        captainBootstrapRequestMatchesBinding(
+          existing.captain_bootstrap || null,
+          options,
+        ),
+        'REGISTRATION_IDEMPOTENCY_MISMATCH',
+        '重复 registration captain bootstrap binding 不一致',
       );
       return { registered: true, idempotent: true, session: publicSession(existing), actor_capability_file: existing.capability_file, task_nonce: existing.task_nonce || undefined };
     }
@@ -12116,6 +12375,9 @@ function registerRole(cwd, options) {
       ...(workerBootstrap
         ? { worker_bootstrap: workerBootstrap }
         : {}),
+      ...(captainBootstrap
+        ? { captain_bootstrap: captainBootstrap }
+        : {}),
       authorized_by: authorizedBy,
       expected: {
         state_revision: state.state_revision,
@@ -12183,6 +12445,12 @@ function registerRole(cwd, options) {
           ? {
             worker_bootstrap:
               registrationRequest.worker_bootstrap,
+          }
+          : {}),
+        ...(registrationRequest.captain_bootstrap
+          ? {
+            captain_bootstrap:
+              registrationRequest.captain_bootstrap,
           }
           : {}),
         capability_sha256: actorCapability.sha256,
@@ -12324,6 +12592,11 @@ function registerRole(cwd, options) {
           `未知 task ${options.taskId}`,
         );
         registrationWorkerBootstrapBinding(
+          prevalidated,
+          prevalidatedState,
+          options,
+        );
+        registrationCaptainBootstrapBinding(
           prevalidated,
           prevalidatedState,
           options,
@@ -13488,6 +13761,7 @@ module.exports = {
   assertMechanicalP1CandidateWriteSet,
   completeMechanicalP1EventPayload,
   mergeExpectedMainHead,
+  validateP1Boundary,
   validateCandidateBoundary,
   nextTasks,
   publicSnapshot,

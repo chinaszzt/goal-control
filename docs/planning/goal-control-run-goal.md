@@ -180,6 +180,65 @@ canary_policy=<path>@sha256:<digest>；先核 exact bytes，再按 shared.md 的
 token/cookie/capability bytes。
 ```
 
+#### 动态 CAPTAIN 的 detached-worktree bootstrap
+
+fresh Goal 若可能把 CAPTAIN 创建为 detached linked worktree，必须在 scaffold spec/manifest
+中单独 opt in；旧 worker-v1 字段和 marker 不授权 CAPTAIN：
+
+```json
+{
+  "captain_canary_bootstrap": {
+    "protocol": "goalctl-captain-canary-bootstrap-v1",
+    "policy": {
+      "path": "<repo-relative-goal-specific.canary-policy.md>",
+      "sha256": "sha256:<64-lowercase-hex>"
+    }
+  }
+}
+```
+
+policy 必须包含 exact 独立行：
+
+```text
+Captain-Canary-Bootstrap-Protocol: goalctl-captain-canary-bootstrap-v1
+```
+
+FOREMAN 依次执行与下节相同的 `canary-bootstrap-plan`、让 CAPTAIN 从 actual process cwd
+执行生成的 `canary-bootstrap-inspect` template，再用同一完整 request 运行
+`canary-bootstrap-prepare`。role 固定 `CAPTAIN`，expected HEAD 固定 task 的
+`required_start_head`，receipt 输出字段为
+`captain_bootstrap_receipt_file/captain_bootstrap_receipt_sha256`，artifact 位于
+Git common-dir 下独立的 `captain-canary-bootstrap-v1` namespace。首次 prepare 只接受
+clean detached linked worktree、absent deterministic ref；manual pre-attach、occupied
+branch、wrong/racing HEAD、cross thread/host/cwd 与异文 retry 全部 fail closed。
+CAPTAIN plan 必须在 Goal init 后读取 sealed Goal state，并在发布任何
+ref/intent/receipt 前机械证明 `--expected-head`：首个 P1 来自 `goal_input_head`，后继
+P1 来自最高 integration-order dependency 的 `main_merge_sha`，无 mechanical `p1`
+配置的 fallback 来自 task `state.full_head`。该 proof 连同 control epoch/state revision/
+task cycle 进入 identity plan；frozen Goal worktree 当前 HEAD 不是替代 authority。
+
+receipt sealed 后，CAPTAIN 从同一 actual cwd 运行 full canary：
+
+```text
+<controller-root>/scripts/goal-control/canary-plan-launch.sh \
+  --repository-worktree <frozen-goal-worktree> \
+  --manifest <same-json> --role CAPTAIN --task <task-id> \
+  --captain-bootstrap-receipt <canonical-absolute-0600-json> \
+  --captain-bootstrap-receipt-sha256 <sha256> \
+  --captain-bootstrap-operation-id <same-stable-id> \
+  --captain-bootstrap-challenge <same-64hex> \
+  --captain-bootstrap-identity-plan-sha256 <same-plan-sha256> \
+  --captain-thread <exact-thread> --captain-host <exact-host> --json
+```
+
+CANARY PASS 后仍必须从该 actual cwd 登记 CAPTAIN，并向 `register-role` 逐字传入 receipt
+五项 binding。registration seal path/hash、operation/challenge/plan、thread/host 和
+cwd/gitdir/common-dir/branch/HEAD；response loss 只允许同 event ID、同 authority、同完整
+request exact retry。`START_P1` 会重新读取并机械验证同一 receipt、durable intent/HEAD
+transaction 与 live identity，然后才接受事件。它仍要求 clean named non-base branch；
+该重验也适用于没有 mechanical `p1` 配置、按旧状态机 fallback 进入 `START_P1` 的 task。
+本协议不允许 detached execution，也不放宽任何既有 `START_P1` 条件。
+
 #### 动态 DEV/REVIEW/RECEIPT 的 worker bootstrap
 
 本节只适用于 manifest 与 policy 已完成双重显式 opt-in 的 fresh Goal。manifest 必须

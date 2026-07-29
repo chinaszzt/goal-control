@@ -4,7 +4,11 @@
 
 **启动模式不可被 compact 掉**：legacy `CANARY_ONLY` 只用于创建前已知 actual cwd，
 或 full plan 确实不需要绑定 opaque worker branch 的 session；对
-DEV/REVIEW/RECEIPT，legacy 还要求 manifest 未启用 worker bootstrap。manifest 以
+CAPTAIN 若 manifest 显式启用
+`goalctl-captain-canary-bootstrap-v1`，也必须先走独立的
+`IDENTITY_ONLY → PREPARE_ACTUAL_WORKTREE → CANARY_EXECUTE` route；旧 worker-v1
+marker 不授权 CAPTAIN，registration 与 `START_P1` 都重新验证 sealed actual-worktree
+identity。DEV/REVIEW/RECEIPT，legacy 还要求 manifest 未启用 worker bootstrap。manifest 以
 `goalctl-worker-canary-bootstrap-v1` + committed policy exact marker 显式 opt in 后，
 这些 worker 初始只能是 `IDENTITY_ONLY`，只读回报 actual
 thread/host/cwd/git identity，待 controller `PREPARE_ACTUAL_WORKTREE` seal receipt 后，

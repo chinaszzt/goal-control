@@ -271,6 +271,7 @@
         "status": { "type": "string", "enum": ["active", "idle", "systemError"] },
         "task_nonce": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{16,128}$" },
         "worker_bootstrap": { "$ref": "#/$defs/workerBootstrap" },
+        "captain_bootstrap": { "$ref": "#/$defs/captainBootstrap" },
         "capability_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "capability_file": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "authorized_by": { "type": "object" },
@@ -449,7 +450,7 @@
     { "if": { "properties": { "type": { "const": "GITHUB_MERGE_RESERVED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["target_event_id", "request_sha256", "repository", "pull_request_number", "pull_request_url", "base_branch", "expected_main_head", "candidate_head", "task_cycle", "phase", "issue", "head_ref_name", "body_sha256", "preflight_attestation", "pr_contract_sha256"], "propertyNames": { "enum": ["target_event_id", "request_sha256", "repository", "pull_request_number", "pull_request_url", "base_branch", "expected_main_head", "candidate_head", "task_cycle", "phase", "issue", "head_ref_name", "body_sha256", "preflight_attestation", "pr_contract_sha256"] } } } } },
     { "if": { "properties": { "type": { "const": "MERGED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["main_merge_sha", "expected_main_head"], "propertyNames": { "enum": ["main_merge_sha", "expected_main_head", "merge_receipt_sha256", "merge_reservation_event_id", "merge_request_sha256"] } } } } },
     { "if": { "properties": { "type": { "const": "ARCHIVED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["evidence_id"], "propertyNames": { "enum": ["evidence_id"] } } } } },
-    { "if": { "properties": { "type": { "const": "REGISTER_ROLE" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by"], "propertyNames": { "enum": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by", "worker_bootstrap", "goal_foreman_projection", "projected_lease_until"] } } } } },
+    { "if": { "properties": { "type": { "const": "REGISTER_ROLE" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by"], "propertyNames": { "enum": ["role", "thread_id", "host_id", "attempt", "lease_ms", "status", "launch_id", "task_nonce", "capability_sha256", "capability_file", "authorized_by", "worker_bootstrap", "captain_bootstrap", "goal_foreman_projection", "projected_lease_until"] } } } } },
     { "if": { "properties": { "type": { "const": "HEARTBEAT" } }, "required": ["type"] }, "then": { "properties": { "payload": { "propertyNames": { "enum": ["lease_ms", "status"] } } } } },
     { "if": { "properties": { "type": { "const": "CONTROL_RECONCILED" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["control_event_id", "instruction_ref"], "propertyNames": { "enum": ["control_event_id", "instruction_ref"] } } } } },
     { "if": { "properties": { "type": { "const": "ADD_HOLD" } }, "required": ["type"] }, "then": { "properties": { "payload": { "required": ["kind", "evidence_id"], "propertyNames": { "enum": ["kind", "hold_id", "reason", "evidence_id"] } } } } },
@@ -668,6 +669,81 @@
         "binding_sha256": {
           "$ref": "#/$defs/sha256"
         }
+      }
+    },
+    "captainBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "receipt_file",
+        "receipt_sha256",
+        "identity_plan_sha256",
+        "identity_observation_sha256",
+        "operation_id",
+        "challenge",
+        "thread",
+        "host",
+        "worktree",
+        "git_dir",
+        "common_git_dir",
+        "head",
+        "branch",
+        "canary_policy",
+        "binding_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "protocol": {
+          "const": "goalctl-captain-canary-bootstrap-v1"
+        },
+        "receipt_file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "receipt_sha256": { "$ref": "#/$defs/sha256" },
+        "identity_plan_sha256": { "$ref": "#/$defs/sha256" },
+        "identity_observation_sha256": { "$ref": "#/$defs/sha256" },
+        "operation_id": { "$ref": "#/$defs/safeId" },
+        "challenge": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "thread": { "$ref": "#/$defs/safeId" },
+        "host": { "$ref": "#/$defs/safeId" },
+        "worktree": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "git_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "common_git_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "head": { "$ref": "#/$defs/fullSha" },
+        "branch": {
+          "type": "string",
+          "pattern": "^codex/.+",
+          "maxLength": 300
+        },
+        "canary_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": { "$ref": "#/$defs/repoPath" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "hardHold": {
