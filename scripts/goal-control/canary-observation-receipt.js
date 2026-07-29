@@ -59,6 +59,7 @@ const VALIDATED_ENUM_STRING_FIELDS = new Set([
 ]);
 const DERIVED_CANONICAL_STRING_FIELDS = new Set([
   'shell_command',
+  'stable_id',
 ]);
 const DISPOSITIONS = Object.freeze([
   'PASS',
@@ -986,6 +987,9 @@ function validateReceipt(options) {
     'CANARY_OBSERVATION_STABLE_ID_MISMATCH',
     `probe observation stable ID 必须精确等于 ${expectedStableId}`,
   );
+  // stable_id is now controller-derived from the separately validated event
+  // ID. The recursive scan may exempt this exact derived field without
+  // allowing a caller-authored 43-character capability-shaped identity.
   const planCapture = readStableFile(request.plan_file, {
     label: 'canary plan',
     parentMode: 0o700,

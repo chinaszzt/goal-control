@@ -622,7 +622,7 @@ function registerPreparedControlIdentity(
   },
 ): Record<string, any> {
   const operationId = prepared.identity.operation_id;
-  const stableId = `obs-${operationId}`;
+  const stableId = `canary-observation-${operationId}`;
   const repositoryHead = loadGoalStateReadOnly(
     repository.root,
     "goal-receipt-integration",

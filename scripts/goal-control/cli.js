@@ -104,12 +104,26 @@ const ROLE_IDENTITY_CAPABILITY_OPTIONS = new Set([
 
 function assertNoSensitiveRoleIdentityArguments(argv) {
   if (!ROLE_IDENTITY_COMMANDS.has(argv[0])) return;
+  const eventIdIndex = argv.indexOf('--event-id');
+  const eventId = eventIdIndex >= 0
+    ? argv[eventIdIndex + 1]
+    : null;
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (
       index > 0
         && ROLE_IDENTITY_CAPABILITY_OPTIONS.has(argv[index - 1])
     ) {
+      continue;
+    }
+    if (
+      index > 0
+        && argv[index - 1] === '--probe-observation-stable-id'
+        && typeof eventId === 'string'
+        && token === `canary-observation-${eventId}`
+    ) {
+      // The event ID is scanned independently in this same argv pass.
+      // Exempt only its exact protocol-derived stable ID serialization.
       continue;
     }
     assertNoSensitiveStringLeaves(token);
