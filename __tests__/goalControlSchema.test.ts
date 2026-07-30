@@ -56,6 +56,18 @@ const { hashObject } = nodeRequire(
 ) as {
   hashObject: (value: unknown) => string;
 };
+const { validateWorkerBootstrapBinding } = nodeRequire(
+  path.join(
+    ROOT,
+    "scripts",
+    "goal-control",
+    "worker-bootstrap-binding.js",
+  ),
+) as {
+  validateWorkerBootstrapBinding: (
+    value: Record<string, any>,
+  ) => Record<string, any>;
+};
 const { applyEvent, initialTaskState } = nodeRequire(
   path.join(ROOT, "scripts", "goal-control", "fsm.js"),
 ) as {
@@ -124,6 +136,89 @@ const GENERIC_PROVIDER_TOKEN_CASES = [
 ] as const;
 
 describe("goal-control machine contract schemas", () => {
+  it("keeps embedded worker bootstrap paths in three-way parity", () => {
+    const intentSchema = readJson(
+      "scripts/goal-control/schemas/role-identity-intent.schema.json",
+    );
+    const eventSchema = readJson(
+      "scripts/goal-control/schemas/event.schema.json",
+    );
+    const intentWorker = compileDraft202012({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $ref: "#/$defs/workerBootstrapBinding",
+      $defs: intentSchema.$defs,
+    });
+    const eventWorker = compileDraft202012({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $ref: "#/$defs/workerBootstrap",
+      $defs: eventSchema.$defs,
+    });
+    const unsigned = {
+      schema_version: 1,
+      protocol: "goalctl-worker-canary-bootstrap-v1",
+      receipt_file: "/private/receipt.json",
+      receipt_sha256: `sha256:${"1".repeat(64)}`,
+      identity_plan_sha256: `sha256:${"2".repeat(64)}`,
+      identity_observation_sha256: `sha256:${"3".repeat(64)}`,
+      operation_id: "worker-bootstrap-parity-1",
+      challenge: "4".repeat(64),
+      thread: PLATFORM_THREAD,
+      host: PLATFORM_HOST,
+      worktree: "/private/worktree",
+      git_dir: "/private/worktree/.git",
+      common_git_dir: "/private/git",
+      head: "a".repeat(40),
+      branch: "codex/worker-bootstrap-parity",
+      canary_policy: {
+        path: "a".repeat(500),
+        sha256: `sha256:${"5".repeat(64)}`,
+      },
+    };
+    const seal = (
+      mutate: (value: Record<string, any>) => void,
+    ): Record<string, any> => {
+      const value = structuredClone(unsigned);
+      mutate(value);
+      return {
+        ...value,
+        binding_sha256: hashObject(value),
+      };
+    };
+    const parity = (
+      value: Record<string, any>,
+      expected: boolean,
+    ): void => {
+      expect(intentWorker(value)).toBe(expected);
+      expect(eventWorker(value)).toBe(expected);
+      let runtime = true;
+      try {
+        validateWorkerBootstrapBinding(value);
+      } catch {
+        runtime = false;
+      }
+      expect(runtime).toBe(expected);
+    };
+    parity(seal(() => {}), true);
+    parity(seal((value) => {
+      value.canary_policy.path = "a".repeat(501);
+    }), false);
+    parity(seal((value) => {
+      value.canary_policy.path = "a/../b";
+    }), false);
+    parity(seal((value) => {
+      value.receipt_file = "relative/receipt.json";
+    }), false);
+    parity(seal((value) => {
+      value.worktree = "/tmp/x/../w";
+    }), false);
+    parity(seal((value) => {
+      value.git_dir = `/${"a".repeat(1999)}`;
+    }), true);
+    parity(seal((value) => {
+      value.common_git_dir = `/${"a".repeat(2000)}`;
+    }), false);
+  });
+
   it("requires v2 identity only across the durable new-goal protocol boundary", () => {
     const packet = {
       revision: 1,
@@ -396,6 +491,8 @@ describe("goal-control machine contract schemas", () => {
         capability_file_identity_sha256:
           `sha256:${"4".repeat(64)}`,
         source_task_id: null,
+        source_state_revision: null,
+        source_event_head_sha256: null,
         role: null,
         thread_id: null,
         host_id: null,
@@ -680,6 +777,11 @@ describe("goal-control machine contract schemas", () => {
     delete legacyIntent.identity_observation.signed_record;
     delete legacyIntent.issuer_authority
       .capability_file_identity_sha256;
+    delete legacyIntent.issuer_authority.source_capability_sha256;
+    delete legacyIntent.issuer_authority
+      .source_capability_file_identity_sha256;
+    delete legacyIntent.issuer_authority.source_state_revision;
+    delete legacyIntent.issuer_authority.source_event_head_sha256;
     delete legacyIntent.intent_sha256;
     legacyIntent.intent_sha256 = hashObject(legacyIntent);
     expect(schemaIntent(legacyIntent)).toBe(false);
@@ -961,7 +1063,7 @@ describe("goal-control machine contract schemas", () => {
         receipt_file: "/private/receipt.json",
         receipt_sha256: `sha256:${"2".repeat(64)}`,
         canary_plan_sha256: `sha256:${"3".repeat(64)}`,
-        stable_id: "probe-observation-schema-v1",
+        stable_id: `canary-observation-${event.event_id}`,
         challenge: "4".repeat(64),
         thread_id: identity.thread_id,
         host_id: identity.host_id,
@@ -1007,7 +1109,11 @@ describe("goal-control machine contract schemas", () => {
           launch_id: sealedIdentity.launch_id,
           role_identity: sealedIdentity,
           ...(probeObservation
-            ? { probe_observation: probeObservation }
+            ? {
+              probe_observation: probeObservation,
+              capability_file_identity_sha256:
+                `sha256:${"c".repeat(64)}`,
+            }
             : {}),
         },
       };
@@ -1027,7 +1133,38 @@ describe("goal-control machine contract schemas", () => {
     };
 
     parity(withIdentity(identityV1), true);
+    const v1ValidCapabilityFileIdentity =
+      withIdentity(identityV1);
+    v1ValidCapabilityFileIdentity.payload
+      .capability_file_identity_sha256 =
+        `sha256:${"c".repeat(64)}`;
+    parity(v1ValidCapabilityFileIdentity, true);
+    const v1NullCapabilityFileIdentity =
+      withIdentity(identityV1);
+    v1NullCapabilityFileIdentity.payload
+      .capability_file_identity_sha256 = null;
+    parity(v1NullCapabilityFileIdentity, false);
+    const v1MalformedCapabilityFileIdentity =
+      withIdentity(identityV1);
+    v1MalformedCapabilityFileIdentity.payload
+      .capability_file_identity_sha256 = "not-a-sha256";
+    parity(v1MalformedCapabilityFileIdentity, false);
     parity(withIdentity(identityV2), true);
+    const v2MissingCapabilityFileIdentity =
+      withIdentity(identityV2);
+    delete v2MissingCapabilityFileIdentity.payload
+      .capability_file_identity_sha256;
+    parity(v2MissingCapabilityFileIdentity, false);
+    const v2NullCapabilityFileIdentity =
+      withIdentity(identityV2);
+    v2NullCapabilityFileIdentity.payload
+      .capability_file_identity_sha256 = null;
+    parity(v2NullCapabilityFileIdentity, false);
+    const v2MalformedCapabilityFileIdentity =
+      withIdentity(identityV2);
+    v2MalformedCapabilityFileIdentity.payload
+      .capability_file_identity_sha256 = "not-a-sha256";
+    parity(v2MalformedCapabilityFileIdentity, false);
     parity(withIdentity({
       ...identityV2,
       operation_id: "A".repeat(200),
@@ -1104,6 +1241,41 @@ describe("goal-control machine contract schemas", () => {
     unsafePacketRevision.packet.revision =
       Number.MAX_SAFE_INTEGER + 1;
     parity(unsafePacketRevision, false);
+    const maximumProbeAttempt = withIdentity(identityV2);
+    maximumProbeAttempt.payload.probe_observation.attempt =
+      Number.MAX_SAFE_INTEGER;
+    parity(resealEventProbeObservation(maximumProbeAttempt), true);
+    const unsafeProbeAttempt = withIdentity(identityV2);
+    unsafeProbeAttempt.payload.probe_observation.attempt =
+      Number.MAX_SAFE_INTEGER + 1;
+    parity(resealEventProbeObservation(unsafeProbeAttempt), false);
+    for (const attempt of [null, 0, 1, Number.MAX_SAFE_INTEGER]) {
+      const attemptBoundary = withIdentity(identityV2);
+      attemptBoundary.payload.probe_observation.attempt = attempt;
+      parity(
+        resealEventProbeObservation(attemptBoundary),
+        attempt === 1 || attempt === Number.MAX_SAFE_INTEGER,
+      );
+    }
+
+    const exactDerived43 = withIdentity(identityV2);
+    exactDerived43.event_id = "x".repeat(24);
+    exactDerived43.payload.probe_observation.stable_id =
+      `canary-observation-${exactDerived43.event_id}`;
+    parity(resealEventProbeObservation(exactDerived43), true);
+    const providerStableMismatch = withIdentity(identityV2);
+    providerStableMismatch.payload.probe_observation.stable_id =
+      `prefix.AKIA${"F".repeat(16)}.suffix`;
+    parity(
+      resealEventProbeObservation(providerStableMismatch),
+      false,
+    );
+    const embeddedNearMiss = withIdentity(identityV2);
+    embeddedNearMiss.event_id =
+      `prefixxglpat-${"A".repeat(8)}suffix`;
+    embeddedNearMiss.payload.probe_observation.stable_id =
+      `canary-observation-${embeddedNearMiss.event_id}`;
+    parity(resealEventProbeObservation(embeddedNearMiss), true);
 
     const sessionAuthority = withIdentity(identityV2);
     sessionAuthority.payload.authorized_by = {

@@ -248,12 +248,23 @@ function applyRegistration(state, event) {
     assertControl(typeof event.payload.task_nonce === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(event.payload.task_nonce), 'TASK_NONCE_REQUIRED', `${role} registration 缺控制面 task_nonce`);
     const registrationPhases = {
       DEV: ['P1_COMMITTED', 'DEV_ACTIVE', 'RECEIPT_FAILED'],
-      REVIEW: ['DEV_READY', 'RECEIPT_FAILED'],
-      RECEIPT: ['REVIEW_PASS'],
+      REVIEW: ['DEV_READY', 'RECEIPT_FAILED', 'REVIEW_ACTIVE'],
+      RECEIPT: ['REVIEW_PASS', 'RECEIPT_ACTIVE'],
     };
-    const recoveryRegistration = role === 'DEV' && state.phase === 'DEV_ACTIVE' && state.recovery && state.recovery.role === 'DEV';
+    const recoveryPhase = {
+      DEV: 'DEV_ACTIVE',
+      REVIEW: 'REVIEW_ACTIVE',
+      RECEIPT: 'RECEIPT_ACTIVE',
+    };
+    const recoveryRegistration = state.phase === recoveryPhase[role]
+      && state.recovery
+      && state.recovery.role === role;
     assertControl(
-      registrationPhases[role].includes(state.phase) && (state.phase !== 'DEV_ACTIVE' || recoveryRegistration),
+      registrationPhases[role].includes(state.phase)
+        && (
+          state.phase !== recoveryPhase[role]
+            || recoveryRegistration
+        ),
       'PREMATURE_ROLE_REGISTRATION',
       `${role} 不能在 phase=${state.phase} 提前登记`,
     );
@@ -388,6 +399,8 @@ function applyRegistration(state, event) {
     registered_task_cycle: state.task_cycle,
     capability_sha256: event.payload.capability_sha256,
     capability_file: event.payload.capability_file,
+    capability_file_identity_sha256:
+      event.payload.capability_file_identity_sha256,
     authorized_by: event.payload.authorized_by,
     registration_event_id: event.event_id,
   };
@@ -411,6 +424,14 @@ function applyHeartbeat(state, event) {
 function applyProbeObservationRefreshed(state, event) {
   const role = event.payload.role;
   const session = state.sessions[role];
+  const identity = event.payload.role_identity;
+  const identityRequired = state.role_identity_protocol_version >= 2
+    || (
+      session
+        && session.role_identity
+        && session.role_identity.protocol
+          === 'goalctl-role-identity-intent-v2'
+    );
   assertControl(
     session
       && session.thread_id === event.actor.thread_id
@@ -433,6 +454,23 @@ function applyProbeObservationRefreshed(state, event) {
       && event.payload.probe_observation.accepted_at === event.accepted_at,
     'CANARY_OBSERVATION_CROSS_IDENTITY',
     'refreshed probe observation 未绑定 exact session/accepted_at',
+  );
+  assertControl(
+    (!identityRequired && identity === undefined)
+      || (
+        identity
+          && identity.protocol === 'goalctl-role-identity-intent-v2'
+          && session.role_identity
+          && identity.session_id === session.role_identity.session_id
+          && identity.thread_id === session.thread_id
+          && identity.host_id === session.host_id
+          && identity.attempt === session.attempt
+          && identity.launch_id === session.launch_id
+          && identity.probe_observation_binding_sha256
+            === event.payload.probe_observation.binding_sha256
+      ),
+    'ROLE_IDENTITY_INTENT_MISMATCH',
+    'probe observation refresh 缺 exact CURRENT_SESSION identity authority',
   );
   session.probe_observation = JSON.parse(
     JSON.stringify(event.payload.probe_observation),
@@ -932,7 +970,10 @@ function applyExpiredForemanRecovery(state, event) {
     registered_task_cycle: state.task_cycle,
     capability_sha256: event.payload.capability_sha256,
     capability_file: event.payload.capability_file,
+    capability_file_identity_sha256:
+      event.payload.capability_file_identity_sha256,
     authorized_by: { role: 'GOAL_RECOVERY' },
+    registration_event_id: event.event_id,
     recovery_event_id: event.payload.root_recovery_id || event.event_id,
     recovery_request_sha256: event.payload.request_sha256,
     recovery_incident_ref: event.payload.incident_ref,
@@ -941,6 +982,15 @@ function applyExpiredForemanRecovery(state, event) {
         probe_observation: JSON.parse(
           JSON.stringify(event.payload.probe_observation),
         ),
+        ...(event.payload.role_identity
+          && event.payload.role_identity.protocol
+            === 'goalctl-role-identity-intent-v2'
+          ? {
+            registration_probe_observation: JSON.parse(
+              JSON.stringify(event.payload.probe_observation),
+            ),
+          }
+          : {}),
       }
       : {}),
     ...(event.payload.role_identity !== undefined

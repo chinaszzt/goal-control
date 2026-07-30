@@ -126,7 +126,20 @@ function assertNoSensitiveRoleIdentityArguments(argv) {
       // Exempt only its exact protocol-derived stable ID serialization.
       continue;
     }
-    assertNoSensitiveStringLeaves(token);
+    try {
+      assertNoSensitiveStringLeaves(token);
+    } catch (error) {
+      if (
+        error
+          && error.code === 'CANARY_OBSERVATION_SENSITIVE_DATA'
+      ) {
+        throw new ControlError(
+          error.code,
+          `role identity argv index=${index} length=${typeof token === 'string' ? token.length : -1} 含敏感数据`,
+        );
+      }
+      throw error;
+    }
   }
 }
 

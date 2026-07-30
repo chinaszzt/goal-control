@@ -104,12 +104,13 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'pr_contract_sha256',
   ],
   ARCHIVED: ['evidence_id'],
-  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'authorized_by', 'worker_bootstrap', 'probe_observation', 'role_identity', 'goal_foreman_projection', 'projected_lease_until'],
+  REGISTER_ROLE: ['role', 'thread_id', 'host_id', 'attempt', 'lease_ms', 'status', 'launch_id', 'task_nonce', 'capability_sha256', 'capability_file', 'capability_file_identity_sha256', 'authorized_by', 'worker_bootstrap', 'probe_observation', 'role_identity', 'goal_foreman_projection', 'projected_lease_until'],
   PROBE_OBSERVATION_REFRESHED: [
     'role',
     'attempt',
     'previous_binding_sha256',
     'probe_observation',
+    'role_identity',
     'request_sha256',
   ],
   HEARTBEAT: ['lease_ms', 'status'],
@@ -189,6 +190,7 @@ const EVENT_PAYLOAD_KEYS = Object.freeze({
     'status',
     'capability_sha256',
     'capability_file',
+    'capability_file_identity_sha256',
     'reason',
     'incident_ref',
     'request_sha256',
@@ -1293,6 +1295,59 @@ function validateEvent(event) {
   const missingPayloadKeys = EVENT_PAYLOAD_REQUIRED[event.type].filter((key) => !Object.prototype.hasOwnProperty.call(payload, key));
   assertControl(missingPayloadKeys.length === 0, 'INVALID_EVENT', `${event.type}.payload 缺字段: ${missingPayloadKeys.join(', ')}`);
   assertNoSensitiveKeys(payload, `${event.type}.payload`, 'INVALID_EVENT');
+  const probeBindingEvent = [
+    'REGISTER_ROLE',
+    'RECOVER_EXPIRED_FOREMAN',
+    'PROBE_OBSERVATION_REFRESHED',
+  ].includes(event.type)
+    && payload.probe_observation !== undefined;
+  const probeStableOperationId =
+    event.type === 'RECOVER_EXPIRED_FOREMAN'
+      ? payload.root_recovery_id
+      : event.event_id;
+  const expectedProbeStableId = probeBindingEvent
+    ? `canary-observation-${probeStableOperationId}`
+    : null;
+  if (probeBindingEvent) {
+    assertNoSensitiveStringLeaves(event.event_id);
+    assertControl(
+      typeof probeStableOperationId === 'string'
+        && probeStableOperationId.length > 0
+        &&
+      payload.probe_observation
+        && payload.probe_observation.stable_id === expectedProbeStableId,
+      'INVALID_EVENT',
+      `${event.type}.payload.probe_observation stable_id/event_id binding 非法`,
+    );
+  }
+  if (event.type === 'RECOVER_EXPIRED_FOREMAN') {
+    assertControl(
+      Number.isSafeInteger(payload.expected_foreman_attempt)
+        && payload.expected_foreman_attempt > 0,
+      'INVALID_EVENT',
+      'RECOVER_EXPIRED_FOREMAN.payload.expected_foreman_attempt 必须是 safe positive integer',
+    );
+    assertControl(
+      payload.authorized_by
+        && payload.authorized_by.role === 'GOAL_RECOVERY'
+        && Object.keys(payload.authorized_by).length === 1,
+      'INVALID_EVENT',
+      'RECOVER_EXPIRED_FOREMAN.payload.authorized_by 必须是 public GOAL_RECOVERY authority',
+    );
+    assertControl(
+      typeof payload.expected_foreman_lease_until === 'string'
+        && /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/
+          .test(payload.expected_foreman_lease_until)
+        && Number.isFinite(Date.parse(
+          payload.expected_foreman_lease_until,
+        ))
+        && new Date(Date.parse(
+          payload.expected_foreman_lease_until,
+        )).toISOString() === payload.expected_foreman_lease_until,
+      'INVALID_EVENT',
+      'RECOVER_EXPIRED_FOREMAN.payload.expected_foreman_lease_until 必须是 canonical date-time',
+    );
+  }
   if (event.type === 'RUNTIME_ROTATED') {
     validateRuntimeRotationPayload(payload);
   }
@@ -1309,7 +1364,21 @@ function validateEvent(event) {
     );
   }
   if (
-    ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN'].includes(event.type)
+    ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN']
+      .includes(event.type)
+      && payload.capability_file_identity_sha256 !== undefined
+  ) {
+    normalizeHash(
+      payload.capability_file_identity_sha256,
+      `${event.type}.payload.capability_file_identity_sha256`,
+    );
+  }
+  if (
+    [
+      'REGISTER_ROLE',
+      'RECOVER_EXPIRED_FOREMAN',
+      'PROBE_OBSERVATION_REFRESHED',
+    ].includes(event.type)
       && payload.role_identity !== undefined
   ) {
     assertPlainObject(
@@ -1320,6 +1389,78 @@ function validateEvent(event) {
     const identityProtocol = payload.role_identity.protocol;
     const v2Identity =
       identityProtocol === 'goalctl-role-identity-intent-v2';
+    if (
+      v2Identity
+        && ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN']
+          .includes(event.type)
+    ) {
+      normalizeHash(
+        payload.capability_file_identity_sha256,
+        `${event.type}.payload.capability_file_identity_sha256`,
+      );
+    }
+    if (
+      v2Identity
+        && event.type === 'RECOVER_EXPIRED_FOREMAN'
+    ) {
+      const rootRecoveryId = payload.root_recovery_id;
+      const derivedChildId = (
+        typeof rootRecoveryId === 'string'
+          ? `${rootRecoveryId.slice(0, 150)}.task.${crypto
+            .createHash('sha256')
+            .update(event.task_id)
+            .digest('hex')
+            .slice(0, 16)}`
+          : null
+      );
+      const scope = payload.goal_scope;
+      const scopeCore = scope && {
+        schema_version: scope.schema_version,
+        goal_id: scope.goal_id,
+        control_epoch: scope.control_epoch,
+        control_event_head: scope.control_event_head,
+        tasks: scope.tasks,
+      };
+      const taskBinding = scope
+        && Array.isArray(scope.tasks)
+        ? scope.tasks.find((task) => task.task_id === event.task_id)
+        : null;
+      const sourceBinding = scope
+        && Array.isArray(scope.tasks)
+        && payload.source_foreman
+        ? scope.tasks.find(
+          (task) => task.task_id === payload.source_foreman.task_id,
+        )
+        : null;
+      assertControl(
+        payload.role_identity.operation_id === rootRecoveryId
+          && (
+            event.event_id === rootRecoveryId
+              || event.event_id === derivedChildId
+          )
+          && scope
+          && scope.scope_sha256 === hashObject(scopeCore)
+          && payload.goal_scope_sha256 === scope.scope_sha256
+          && taskBinding
+          && Array.isArray(payload.scope_task_ids)
+          && payload.scope_task_ids.includes(event.task_id)
+          && Array.isArray(payload.source_task_ids)
+          && payload.source_task_ids.length > 0
+          && payload.source_task_ids.every((taskId) => (
+            scope.tasks.some((task) => task.task_id === taskId)
+          ))
+          && sourceBinding
+          && sourceBinding.foreman
+          && sourceBinding.foreman.thread_id
+            === payload.source_foreman.thread_id
+          && sourceBinding.foreman.host_id
+            === payload.source_foreman.host_id
+          && sourceBinding.foreman.attempt
+            === payload.source_foreman.attempt,
+        'INVALID_EVENT',
+        'RECOVER_EXPIRED_FOREMAN v2 root/child/scope identity composite binding 非法',
+      );
+    }
     assertOnlyKeys(
       payload.role_identity,
       [
@@ -1426,6 +1567,11 @@ function validateEvent(event) {
         'REGISTER_ROLE.payload.role_identity v2 authority binding 非法',
       );
     }
+    assertControl(
+      event.type !== 'PROBE_OBSERVATION_REFRESHED' || v2Identity,
+      'INVALID_EVENT',
+      'PROBE_OBSERVATION_REFRESHED 只接受 v2 CURRENT_SESSION identity authority',
+    );
     controllerOpaqueId(
       payload.role_identity.operation_id,
       'REGISTER_ROLE.payload.role_identity.operation_id',
@@ -1464,6 +1610,9 @@ function validateEvent(event) {
     }
     assertNoSensitiveStringLeaves(
       v2Identity ? payload : payload.role_identity,
+      expectedProbeStableId === null
+        ? {}
+        : { allowedDerivedStableId: expectedProbeStableId },
     );
     if (event.type === 'REGISTER_ROLE') {
       const workerRole = ['DEV', 'REVIEW', 'RECEIPT']
@@ -1608,6 +1757,9 @@ function validateEvent(event) {
       payload.probe_observation,
       `${event.type}.payload.probe_observation`,
     );
+    assertNoSensitiveStringLeaves(payload.probe_observation, {
+      allowedDerivedStableId: expectedProbeStableId,
+    });
   }
   if (
     event.type === 'RESOLVE_HOLD'

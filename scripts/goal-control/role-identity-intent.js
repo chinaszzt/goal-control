@@ -383,6 +383,12 @@ function validateRoleIdentityIntent(value, options = {}) {
       'worker_bootstrap',
       'worker_bootstrap_authority',
     );
+    if (
+      value.predecessor_intent_sha256 !== undefined
+        || value.renewal_index !== undefined
+    ) {
+      keys.push('predecessor_intent_sha256', 'renewal_index');
+    }
   }
   exactKeys(
     value,
@@ -424,7 +430,19 @@ function validateRoleIdentityIntent(value, options = {}) {
     'bootstrap_init_receipt_sha256',
     'recovery_scope_sha256',
   ];
-  if (!legacy) issuerKeys.push('capability_file_identity_sha256');
+  if (!legacy) {
+    issuerKeys.push(
+      'capability_file_identity_sha256',
+      'source_state_revision',
+      'source_event_head_sha256',
+    );
+    if (value.issuer_authority.kind === 'GOAL_RECOVERY') {
+      issuerKeys.push(
+        'source_capability_sha256',
+        'source_capability_file_identity_sha256',
+      );
+    }
+  }
   exactKeys(
     value.issuer_authority,
     issuerKeys,
@@ -453,7 +471,7 @@ function validateRoleIdentityIntent(value, options = {}) {
       'ROLE_IDENTITY_INTENT_INVALID',
     );
   }
-  const semanticSlotSha256 = hashObject({
+  const semanticSlot = {
     schema_version: 1,
     kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
     goal_id: value.goal_id,
@@ -466,7 +484,19 @@ function validateRoleIdentityIntent(value, options = {}) {
     base_head: value.base_head,
     full_head: value.full_head,
     task_cycle: value.task_cycle,
-  });
+  };
+  const renewal = !legacy
+    && value.predecessor_intent_sha256 !== undefined;
+  const semanticSlotSha256 = hashObject(
+    renewal
+      ? {
+        ...semanticSlot,
+        predecessor_intent_sha256:
+          value.predecessor_intent_sha256,
+        renewal_index: value.renewal_index,
+      }
+      : semanticSlot,
+  );
   assertControl(
     value.schema_version === 1
       && value.kind === INTENT_KIND
@@ -482,6 +512,17 @@ function validateRoleIdentityIntent(value, options = {}) {
               value.semantic_slot_sha256 || '',
             )
               && value.semantic_slot_sha256 === semanticSlotSha256
+              && (
+                renewal
+                  ? (
+                    /^sha256:[0-9a-f]{64}$/.test(
+                      value.predecessor_intent_sha256 || '',
+                    )
+                      && Number.isSafeInteger(value.renewal_index)
+                      && value.renewal_index > 0
+                  )
+                  : value.renewal_index === undefined
+              )
           )
       )
       && ROLES.has(value.role)
@@ -597,6 +638,15 @@ function validateRoleIdentityIntent(value, options = {}) {
         value.issuer_authority.kind !== 'BOOTSTRAP'
           || (
             value.issuer_authority.source_task_id === null
+              && (
+                legacy
+                  || (
+                    value.issuer_authority
+                      .source_state_revision === null
+                      && value.issuer_authority
+                        .source_event_head_sha256 === null
+                  )
+              )
               && value.issuer_authority.role === null
               && value.issuer_authority.thread_id === null
               && value.issuer_authority.host_id === null
@@ -622,6 +672,14 @@ function validateRoleIdentityIntent(value, options = {}) {
         value.issuer_authority.kind !== 'GOAL_RECOVERY'
           || (
             value.issuer_authority.bootstrap_init_receipt_sha256 === null
+              && /^[0-9a-f]{64}$/.test(
+                value.issuer_authority
+                  .source_capability_sha256 || '',
+              )
+              && /^sha256:[0-9a-f]{64}$/.test(
+                value.issuer_authority
+                  .source_capability_file_identity_sha256 || '',
+              )
               && /^sha256:[0-9a-f]{64}$/.test(
                 value.issuer_authority.recovery_scope_sha256 || '',
               )
@@ -687,6 +745,19 @@ function validateRoleIdentityIntent(value, options = {}) {
   if (value.issuer_authority.kind !== 'BOOTSTRAP') {
     assertControl(
       ROLES.has(value.issuer_authority.role)
+        && (
+          legacy
+            || (
+              Number.isSafeInteger(
+                value.issuer_authority.source_state_revision,
+              )
+                && value.issuer_authority.source_state_revision > 0
+                && /^sha256:[0-9a-f]{64}$/.test(
+                  value.issuer_authority
+                    .source_event_head_sha256 || '',
+                )
+            )
+        )
         && Number.isSafeInteger(value.issuer_authority.attempt)
         && value.issuer_authority.attempt > 0,
       'ROLE_IDENTITY_INTENT_INVALID',
