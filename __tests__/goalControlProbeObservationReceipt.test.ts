@@ -669,6 +669,7 @@ function recoverPreparedForemanIdentity(
     taskId: string;
     attempt: number;
     repositoryWorktree?: string;
+    captureArgs?: (args: string[]) => void;
   },
 ): Record<string, any> {
   const operationId = prepared.identity.operation_id;
@@ -727,7 +728,7 @@ function recoverPreparedForemanIdentity(
   writePrivateJson(planFile, prepared.planEnvelope);
   writePrivateJson(receiptFile, receipt);
   const currentForeman = state.sessions.FOREMAN || null;
-  return goalCommand([
+  const args = [
     "recover-expired-foreman",
     "--goal", "goal-receipt-integration",
     "--task", values.taskId,
@@ -765,7 +766,9 @@ function recoverPreparedForemanIdentity(
     "--probe-observation-challenge",
     prepared.challenge.challenge,
     "--json",
-  ], repositoryWorktree).value;
+  ];
+  if (values.captureArgs) values.captureArgs([...args]);
+  return goalCommand(args, repositoryWorktree).value;
 }
 
 function registerPreparedControlIdentity(
@@ -1185,13 +1188,14 @@ function refreshControlAuthority(
   authority: Record<string, any>,
   role: "FOREMAN" | "CAPTAIN",
   tag: string,
+  taskId = "TASK-A",
 ): Record<string, any> {
   const loaded = loadGoalStateReadOnly(
     repository.root,
     "goal-receipt-integration",
     (current) => current,
   );
-  const state = loaded.snapshot.tasks["TASK-A"];
+  const state = loaded.snapshot.tasks[taskId];
   const session = state.sessions[role];
   const eventId = `refresh-${role.toLowerCase()}-${tag}`;
   const planEnvelope = canaryPlan(frozenRepositoryWorktree, {
@@ -1200,12 +1204,12 @@ function refreshControlAuthority(
       repository.manifestFile,
     ),
     role,
-    taskId: role === "FOREMAN" ? null : "TASK-A",
+    taskId: role === "FOREMAN" ? null : taskId,
     browserCanaryReceipt: null,
   });
   const identity = roleIdentityObservation(repository, {
     operationId: eventId,
-    taskId: "TASK-A",
+    taskId,
     role,
     threadId: session.thread_id,
     hostId: session.host_id,
@@ -1222,7 +1226,7 @@ function refreshControlAuthority(
   const challenge = goalCommand([
     "prepare-probe-observation-challenge",
     "--goal", "goal-receipt-integration",
-    "--task", "TASK-A",
+    "--task", taskId,
     "--role", role,
     "--event-id", eventId,
     "--canary-plan-sha256",
@@ -1236,7 +1240,7 @@ function refreshControlAuthority(
   const receipt = fakeReceipt({
     registrationEventId: eventId,
     goalId: "goal-receipt-integration",
-    taskId: "TASK-A",
+    taskId,
     role,
     threadId: session.thread_id,
     hostId: session.host_id,
@@ -1275,7 +1279,7 @@ function refreshControlAuthority(
   return goalCommand([
     "refresh-probe-observation",
     "--goal", "goal-receipt-integration",
-    "--task", "TASK-A",
+    "--task", taskId,
     "--role", role,
     "--thread", session.thread_id,
     "--host", session.host_id,
@@ -1304,8 +1308,8 @@ function seedLifecycleEvidence(
   artifacts: string,
   values: {
     evidenceId: string;
-    kind: "REVIEW" | "RECEIPT";
-    producerRole: "REVIEW" | "RECEIPT";
+    kind: "REVIEW" | "RECEIPT" | "MERGE_BOUNDARY";
+    producerRole: "FOREMAN" | "REVIEW" | "RECEIPT";
     status: "PASS" | "FAIL";
     actorCapabilityFile: string;
     worktree: string;
@@ -3548,6 +3552,114 @@ describe("sealed probe observation receipt", () => {
       String(currentBundleFile),
       "utf8",
     ));
+    const resealPendingBundle = (
+      mutate: (bundle: Record<string, any>) => void,
+    ): Record<string, any> => {
+      const bundle = structuredClone(currentBundle);
+      mutate(bundle);
+      const signedRecord =
+        bundle.intent.identity_observation.signed_record;
+      const unsignedSignedRecord = { ...signedRecord };
+      delete unsignedSignedRecord.record_sha256;
+      signedRecord.record_sha256 = hashObject(unsignedSignedRecord);
+      bundle.intent.identity_observation.record_sha256 =
+        signedRecord.record_sha256;
+      const unsignedIntent = { ...bundle.intent };
+      delete unsignedIntent.intent_sha256;
+      bundle.intent.intent_sha256 = hashObject(unsignedIntent);
+      const unsignedChallenge = { ...bundle.challenge };
+      delete unsignedChallenge.record_sha256;
+      bundle.challenge.record_sha256 =
+        hashObject(unsignedChallenge);
+      const unsignedBundle = { ...bundle };
+      delete unsignedBundle.bundle_sha256;
+      bundle.bundle_sha256 = hashObject(unsignedBundle);
+      return bundle;
+    };
+    for (const [name, mutate] of [
+      ["thread", (bundle: Record<string, any>) => {
+        const changed = platformUuid(
+          "pending-signed-record-thread-tamper",
+        );
+        bundle.intent.thread_id = changed;
+        bundle.intent.identity_observation.signed_record.thread_id =
+          changed;
+        bundle.challenge.thread_id = changed;
+      }],
+      ["host", (bundle: Record<string, any>) => {
+        const changed = platformUuid(
+          "pending-signed-record-host-tamper",
+        );
+        bundle.intent.host_id = changed;
+        bundle.intent.identity_observation.signed_record.host_id =
+          changed;
+        bundle.challenge.host_id = changed;
+      }],
+      ["signature", (bundle: Record<string, any>) => {
+        bundle.intent.identity_observation.signed_record
+          .attestation.signature_base64url = "A".repeat(86);
+      }],
+    ] as const) {
+      writePrivateJson(
+        String(currentBundleFile),
+        resealPendingBundle(mutate),
+      );
+      const beforeRejectedPending = ordinaryFileSnapshot(
+        current.repository.controlDir,
+      );
+      for (const args of [
+        [
+          "status",
+          "--goal", current.options.goalId,
+          "--json",
+        ],
+        [
+          "actions",
+          "--goal", current.options.goalId,
+          "--task", current.options.taskId,
+          "--json",
+        ],
+        [
+          "register-role",
+          "--goal", current.options.goalId,
+          "--task", current.options.taskId,
+          "--role", "FOREMAN",
+          "--thread", current.options.threadId,
+          "--host", current.options.hostId,
+          "--attempt", "1",
+          "--event-id", current.options.registrationEventId,
+          "--bootstrap-capability-file",
+          String(current.initialized.bootstrap_capability_file),
+          "--probe-observation-receipt", current.receiptFile,
+          "--probe-observation-receipt-sha256",
+          current.options.probeObservationReceiptSha256,
+          "--probe-observation-plan", current.planFile,
+          "--probe-observation-plan-sha256",
+          current.options.probeObservationPlanSha256,
+          "--probe-observation-stable-id",
+          current.options.probeObservationStableId,
+          "--probe-observation-challenge",
+          current.options.probeObservationChallenge,
+          "--json",
+        ],
+      ]) {
+        expect(() => goalCommand(args, current.repository.root))
+          .toThrow(expect.objectContaining({
+            code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+          }));
+      }
+      expect(ordinaryFileSnapshot(current.repository.controlDir))
+        .toEqual(beforeRejectedPending);
+      writePrivateJson(String(currentBundleFile), currentBundle);
+      expect(goalCommand([
+        "status",
+        "--goal", current.options.goalId,
+        "--json",
+      ], current.repository.root).value.tasks["TASK-A"]
+        .role_identity_intent.operation_id)
+        .toBe(current.options.registrationEventId);
+      expect(name.length).toBeGreaterThan(0);
+    }
     const legacyIntent = structuredClone(currentBundle.intent);
     delete legacyIntent.semantic_slot_sha256;
     delete legacyIntent.worker_bootstrap;
@@ -6356,6 +6468,7 @@ describe("sealed probe observation receipt", () => {
     const repository = integrationRepository({
       identityTtlMs: 900_000,
       workerBootstrap: true,
+      twoTasks: true,
     });
     process.env.GOAL_CONTROL_DIR = repository.controlDir;
     process.env.GOAL_CONTROL_TEST_MODE = "1";
@@ -6779,6 +6892,280 @@ describe("sealed probe observation receipt", () => {
         },
       },
     });
+
+    submitPublicGoalEvent(repository, artifacts, {
+      eventId: "ready-for-merge-before-archived-adoption",
+      type: "READY_FOR_MERGE",
+      actorRole: "CAPTAIN",
+      actorCapabilityFile:
+        String(captain.actor_capability_file),
+      payload: {},
+      cwd: p1.worktree,
+    });
+    submitPublicGoalEvent(repository, artifacts, {
+      eventId: "merged-before-archived-adoption",
+      type: "MERGED",
+      actorRole: "FOREMAN",
+      actorCapabilityFile:
+        String(foreman.actor_capability_file),
+      payload: {
+        expected_main_head: repository.manifest.base_head,
+        main_merge_sha: p1.fullHead,
+      },
+      cwd: p1.worktree,
+    });
+    const archiveEvidence = seedLifecycleEvidence(
+      repository,
+      artifacts,
+      {
+        evidenceId: "archive-before-v2-adoption",
+        kind: "MERGE_BOUNDARY",
+        producerRole: "FOREMAN",
+        status: "PASS",
+        actorCapabilityFile:
+          String(foreman.actor_capability_file),
+        worktree: p1.worktree,
+      },
+    );
+    submitPublicGoalEvent(repository, artifacts, {
+      eventId: "archive-before-v2-adoption",
+      type: "ARCHIVED",
+      actorRole: "FOREMAN",
+      actorCapabilityFile:
+        String(foreman.actor_capability_file),
+      payload: { evidence_id: archiveEvidence },
+      cwd: p1.worktree,
+    });
+    const archived = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (loaded) => loaded.snapshot.tasks["TASK-A"],
+    );
+    expect(archived.phase).toBe("ARCHIVED");
+    const goalDirectory = path.join(
+      repository.controlDir,
+      "goals",
+      "goal-receipt-integration",
+    );
+    const archivedSourceEvents = ordinaryFileSnapshot(path.join(
+      goalDirectory,
+      "events",
+      "TASK-A",
+    ));
+    const archivedSourceHead = readFileSync(path.join(
+      goalDirectory,
+      "event-heads",
+      "TASK-A.json",
+    ));
+    const archivedControlHead = readFileSync(path.join(
+      goalDirectory,
+      "control-head.json",
+    ));
+    const recoveryNow = new Date(
+      Date.parse(archived.sessions.FOREMAN.lease_until) + 1,
+    ).toISOString();
+    process.env.GOAL_CONTROL_NOW = recoveryNow;
+    const recoveryOperationId =
+      "recover-archived-source-to-task-b-2";
+    const recoveryPrepared = prepareRoleIdentityChallenge(
+      repository,
+      artifacts,
+      {
+        operationId: recoveryOperationId,
+        taskId: "TASK-B",
+        role: "FOREMAN",
+        threadId: "actual-archived-adoption-thread-2",
+        hostId: "actual-archived-adoption-host-2",
+        sessionId: "actual-archived-adoption-session-2",
+        launchId: null,
+        issuerCapabilityFile: String(
+          initialized.foreman_recovery_capability_file,
+        ),
+        observedAt: recoveryNow,
+        repositoryHead:
+          repository.manifest.base_head,
+      },
+    );
+    const beforeSkippedAdoption = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(() => recoverPreparedForemanIdentity(
+      repository,
+      artifacts,
+      initialized,
+      recoveryPrepared,
+      {
+        taskId: "TASK-B",
+        attempt: 1,
+      },
+    )).toThrow();
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeSkippedAdoption);
+    expect(() => recoverPreparedForemanIdentity(
+      repository,
+      artifacts,
+      initialized,
+      recoveryPrepared,
+      {
+        taskId: "TASK-B",
+        attempt: 3,
+      },
+    )).toThrow();
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeSkippedAdoption);
+    let exactRecoveryArgs: string[] = [];
+    const adopted = recoverPreparedForemanIdentity(
+      repository,
+      artifacts,
+      initialized,
+      recoveryPrepared,
+      {
+        taskId: "TASK-B",
+        attempt: 2,
+        captureArgs: (args) => {
+          exactRecoveryArgs = args;
+        },
+      },
+    );
+    expect(adopted).toMatchObject({
+      recovered: true,
+      idempotent: false,
+      recovered_task_ids: ["TASK-B"],
+      source_task_ids: ["TASK-A"],
+      session: {
+        role: "FOREMAN",
+        thread_id: recoveryPrepared.identity.thread_id,
+        host_id: recoveryPrepared.identity.host_id,
+        attempt: 2,
+        role_identity: {
+          operation_id: recoveryOperationId,
+          attempt: 2,
+        },
+      },
+    });
+    const beforeAdoptionRetry = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(goalCommand(
+      exactRecoveryArgs,
+      repository.root,
+    ).value).toMatchObject({
+      recovered: true,
+      idempotent: true,
+    });
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeAdoptionRetry);
+    const recoveredLoaded = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (loaded) => loaded,
+    );
+    expect(recoveredLoaded.snapshot.tasks["TASK-A"]).toEqual(archived);
+    expect(ordinaryFileSnapshot(path.join(
+      goalDirectory,
+      "events",
+      "TASK-A",
+    ))).toEqual(archivedSourceEvents);
+    expect(readFileSync(path.join(
+      goalDirectory,
+      "event-heads",
+      "TASK-A.json",
+    ))).toEqual(archivedSourceHead);
+    expect(readFileSync(path.join(
+      goalDirectory,
+      "control-head.json",
+    ))).toEqual(archivedControlHead);
+    const acceptedRecoveryEvent = readdirSync(path.join(
+      goalDirectory,
+      "events",
+      "TASK-B",
+    ))
+      .map((name) => JSON.parse(readFileSync(path.join(
+        goalDirectory,
+        "events",
+        "TASK-B",
+        name,
+      ), "utf8")))
+      .find((event) => event.event_id === recoveryOperationId);
+    expect(acceptedRecoveryEvent).toMatchObject({
+      event_id: recoveryOperationId,
+      type: "RECOVER_EXPIRED_FOREMAN",
+      payload: {
+        root_recovery_id: recoveryOperationId,
+        probe_observation: {
+          stable_id:
+            `canary-observation-${recoveryOperationId}`,
+        },
+        role_identity: {
+          operation_id: recoveryOperationId,
+          attempt: 2,
+        },
+      },
+    });
+    const beforeAdoptionReads = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(goalCommand([
+      "status",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ], repository.root).value.tasks["TASK-B"].sessions.FOREMAN)
+      .toMatchObject({
+        attempt: 2,
+        role_identity: {
+          operation_id: recoveryOperationId,
+        },
+      });
+    expect(goalCommand([
+      "actions",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-B",
+      "--role", "FOREMAN",
+      "--thread", recoveryPrepared.identity.thread_id,
+      "--json",
+    ], repository.root).value.task_id).toBe("TASK-B");
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeAdoptionReads);
+    const registrationProbe = structuredClone(
+      recoveredLoaded.snapshot.tasks["TASK-B"]
+        .sessions.FOREMAN.registration_probe_observation,
+    );
+    const recoveredRoleIdentity = structuredClone(
+      recoveredLoaded.snapshot.tasks["TASK-B"]
+        .sessions.FOREMAN.role_identity,
+    );
+    process.env.GOAL_CONTROL_NOW = new Date(
+      Date.parse(recoveryNow) + 1_000,
+    ).toISOString();
+    const refreshedAdoption = refreshControlAuthority(
+      repository,
+      repository.root,
+      artifacts,
+      adopted,
+      "FOREMAN",
+      "archived-adoption",
+      "TASK-B",
+    );
+    expect(refreshedAdoption).toMatchObject({
+      refreshed: true,
+      session: {
+        attempt: 2,
+        role_identity: recoveredRoleIdentity,
+        registration_probe_observation: registrationProbe,
+      },
+    });
+    const afterAdoptionRefresh = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (loaded) => loaded.snapshot.tasks["TASK-B"].sessions.FOREMAN,
+    );
+    expect(afterAdoptionRefresh.role_identity)
+      .toEqual(recoveredRoleIdentity);
+    expect(afterAdoptionRefresh.registration_probe_observation)
+      .toEqual(registrationProbe);
+    expect(afterAdoptionRefresh.probe_observation.binding_sha256)
+      .toBe(refreshedAdoption.session.probe_observation.binding_sha256);
+    delete process.env.GOAL_CONTROL_NOW;
   });
 
   test.each(["REVIEW", "RECEIPT"] as const)(

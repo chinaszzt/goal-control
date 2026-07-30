@@ -4865,6 +4865,19 @@ function assertRoleIdentityAuthorityReplay(
     );
   }
   for (const entry of inventory) {
+    if (protocolVersion >= 2 && manifest) {
+      try {
+        verifyRoleIdentityObservationRecord(
+          entry.intent.identity_observation.signed_record,
+          manifest.probe_observation_receipts.host_attestation,
+        );
+      } catch {
+        throw new ControlError(
+          'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+          'pending role identity signed observation authentication 漂移',
+        );
+      }
+    }
     assertControl(
       protocolVersion < 2
         || (
@@ -6410,8 +6423,12 @@ function buildForemanRecoveryEvent(options) {
       status: 'active',
       capability_sha256: capability.sha256,
       capability_file: capability.file,
-      capability_file_identity_sha256:
-        capability.file_identity_sha256,
+      ...(roleIdentity
+        ? {
+          capability_file_identity_sha256:
+            capability.file_identity_sha256,
+        }
+        : {}),
       reason,
       incident_ref: incidentRef,
       request_sha256: requestSha256,
@@ -13424,6 +13441,88 @@ function assertForemanRecoveryIntentRecoveryBoundary(
   return true;
 }
 
+function completedForemanRecoveryRetryResult(root, options) {
+  const goalId = safeId(options.goalId, 'goal_id');
+  const rootRecoveryId = safeId(
+    options.eventId,
+    'root recovery event_id',
+  );
+  const paths = goalPaths(root, goalId);
+  const batch = recoveryBatchState(
+    paths,
+    goalId,
+    rootRecoveryId,
+  );
+  if (!batch.intent || !batch.commit) return null;
+  const loaded = loadGoalStateUnlocked(root, goalId, {
+    repairHeads: false,
+    repairBootstrapConsumption: false,
+  });
+  assertControl(
+    loaded.snapshot.tasks[options.taskId],
+    'UNKNOWN_TASK',
+    `未知 task ${options.taskId}`,
+  );
+  const recoveryAuthority = readCapabilityFile(
+    options.foremanRecoveryCapabilityFile,
+    loaded.meta.foreman_recovery_capability_file,
+  );
+  assertControl(
+    hashesEqual(
+      recoveryAuthority.sha256,
+      loaded.meta.foreman_recovery_capability_sha256,
+    ),
+    'CAPABILITY_INVALID',
+    'Goal FOREMAN recovery capability 不匹配',
+  );
+  assertForemanRecoveryIntentRecoveryBoundary(
+    root,
+    loaded,
+    options,
+    rootRecoveryId,
+    batch.intent,
+    batch.commit,
+  );
+  const targetTaskIds = [...batch.intent.target_task_ids];
+  const sourceTaskIds = [...batch.intent.source_task_ids];
+  const anchor = loaded.snapshot.tasks[options.taskId];
+  const currentForeman = anchor.sessions.FOREMAN;
+  return {
+    recovered: true,
+    idempotent: true,
+    cache_degraded: false,
+    event_id: rootRecoveryId,
+    event_sha256_by_task: {
+      ...batch.commit.event_sha256_by_task,
+    },
+    recovered_task_ids: targetTaskIds,
+    source_task_ids: sourceTaskIds,
+    task: publicTaskState(anchor),
+    tasks: Object.fromEntries(targetTaskIds.map((taskId) => [
+      taskId,
+      publicTaskState(loaded.snapshot.tasks[taskId]),
+    ])),
+    session: currentForeman
+      && currentForeman.thread_id === options.threadId
+      && currentForeman.attempt === Number(options.attempt)
+      ? publicSession(currentForeman)
+      : {
+        role: 'FOREMAN',
+        thread_id: options.threadId,
+        host_id: options.hostId || 'local',
+        attempt: Number(options.attempt),
+        status: 'superseded',
+      },
+    actor_capability_file: batch.intent.capability_file,
+    ledger: buildLedgerProjection(
+      loaded.paths,
+      loaded.manifest,
+      loaded.snapshot,
+      { readOnly: true },
+    ),
+  };
+}
+
 function exactUnsealedForemanRecoveryPreparedRequest(
   loaded,
   options,
@@ -13745,6 +13844,7 @@ function recoverExpiredForeman(cwd, options) {
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
   let recoveryBundleCapture = null;
+  let readOnlyRecoveryRetry = null;
   return withLock(root, () => {
     safeId(options.goalId, 'goal_id');
     assertControl(
@@ -14550,7 +14650,11 @@ function recoverExpiredForeman(cwd, options) {
     beforeGeneration: (transaction) => {
       oddRecoveryAuthorized = false;
       pristineOddRecoveryAuthorized = false;
+      readOnlyRecoveryRetry = null;
       if (transaction.mode === 'FRESH') {
+        readOnlyRecoveryRetry =
+          completedForemanRecoveryRetryResult(root, options);
+        if (readOnlyRecoveryRetry !== null) return;
         const recoveryPaths = goalPaths(
           root,
           safeId(options.goalId, 'goal_id'),
@@ -14634,6 +14738,14 @@ function recoverExpiredForeman(cwd, options) {
     },
     authorizeOddRecovery: () => oddRecoveryAuthorized,
     authorizePristineOddRecovery: () => pristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyRecoveryRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyRecoveryRetry,
+        }
+    ),
     afterGenerationBeforeCallback: generationBoundaryFaultHook(
       cwd,
       'GOAL_CONTROL_TEST_FAULT_AFTER_FOREMAN_RECOVERY_GENERATION',
