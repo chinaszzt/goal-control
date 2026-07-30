@@ -7521,11 +7521,6 @@ describe("sealed probe observation receipt", () => {
       "--thread", recoveryPrepared.identity.thread_id,
       "--json",
     ], repository.root).value;
-    const publicAdoptionRebuild = goalCommand([
-      "rebuild-ledger",
-      "--goal", "goal-receipt-integration",
-      "--json",
-    ], repository.root).value;
     expect(publicAdoptionActions).toMatchObject({
       goal_id: "goal-receipt-integration",
       task_id: "TASK-B",
@@ -7546,26 +7541,11 @@ describe("sealed probe observation receipt", () => {
       allowed_actions: expect.any(Array),
       maintenance_actions: expect.any(Array),
     });
-    expect(publicAdoptionRebuild).toMatchObject({
-      goal_id: "goal-receipt-integration",
-      tasks: {
-        "TASK-B": {
-          sessions: {
-            FOREMAN: {
-              role_identity: {
-                operation_id: recoveryOperationId,
-              },
-            },
-          },
-        },
-      },
-    });
     for (const publicValue of [
       publicAdoptionStatus,
       publicAdoptionActions,
       publicAdoptionNext,
       publicAdoptionResume,
-      publicAdoptionRebuild,
     ]) {
       const serialized = JSON.stringify(publicValue);
       expect(serialized).not.toContain(
@@ -7580,6 +7560,35 @@ describe("sealed probe observation receipt", () => {
     }
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeAdoptionReads);
+    const publicAdoptionRebuild = goalCommand([
+      "rebuild-ledger",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ], repository.root).value;
+    expect(publicAdoptionRebuild).toMatchObject({
+      goal_id: "goal-receipt-integration",
+      tasks: {
+        "TASK-B": {
+          sessions: {
+            FOREMAN: {
+              role_identity: {
+                operation_id: recoveryOperationId,
+              },
+            },
+          },
+        },
+      },
+    });
+    const serializedRebuild = JSON.stringify(publicAdoptionRebuild);
+    expect(serializedRebuild).not.toContain(
+      "capability_file_identity_sha256",
+    );
+    expect(serializedRebuild).not.toContain(
+      "source_capability_file_identity_sha256",
+    );
+    expect(serializedRebuild).not.toContain(recoveryCapabilityIdentity);
+    expect(serializedRebuild).not.toContain(sourceCapabilityIdentity);
+    expect(serializedRebuild).not.toContain(recoveryCapabilityBytes);
     const registrationProbe = structuredClone(
       recoveredLoaded.snapshot.tasks["TASK-B"]
         .sessions.FOREMAN.registration_probe_observation,
