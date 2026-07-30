@@ -3604,6 +3604,27 @@ describe("sealed probe observation receipt", () => {
     const issuerPath = String(
       current.initialized.bootstrap_capability_file,
     );
+    const beforeSemanticConflict = ordinaryFileSnapshot(
+      current.repository.controlDir,
+    );
+    expect(() => goalCommand([
+      "prepare-probe-observation-challenge",
+      "--goal", current.options.goalId,
+      "--task", current.options.taskId,
+      "--role", "FOREMAN",
+      "--event-id", duplicateEventId,
+      "--canary-plan-sha256",
+      current.options.probeObservationPlanSha256,
+      "--issuer-capability-file",
+      issuerPath,
+      "--identity-receipt", duplicateFile,
+      "--identity-receipt-sha256", fileSha256(duplicateFile),
+      "--json",
+    ], current.repository.root)).toThrow(expect.objectContaining({
+      code: "CANARY_OBSERVATION_REPLAY_CONFLICT",
+    }));
+    expect(ordinaryFileSnapshot(current.repository.controlDir))
+      .toEqual(beforeSemanticConflict);
     const issuerBytes = readFileSync(issuerPath);
     unlinkSync(issuerPath);
     writeFileSync(issuerPath, issuerBytes, { mode: 0o600 });
@@ -3629,6 +3650,108 @@ describe("sealed probe observation receipt", () => {
     }));
     expect(ordinaryFileSnapshot(current.repository.controlDir))
       .toEqual(beforeDuplicate);
+  });
+
+  test("accepts an exact verified Ed25519 signature that resembles a credential and rejects the same bytes when relocated", () => {
+    const repository = integrationRepository();
+    process.env.GOAL_CONTROL_DIR = repository.controlDir;
+    process.env.GOAL_CONTROL_TEST_MODE = "1";
+    const initialized = goalCommand([
+      "init",
+      "--manifest", repository.manifestFile,
+      "--json",
+    ], repository.root).value;
+    const artifacts = realpathSync(mkdtempSync(
+      path.join(tmpdir(), "goal-role-identity-crypto-context-"),
+    ));
+    roots.push(artifacts);
+    chmodSync(artifacts, 0o700);
+    const foreman = registerControlAuthority(
+      repository,
+      initialized,
+      artifacts,
+      "FOREMAN",
+      null,
+    );
+    const operationId = "captain-crypto-context-1";
+    let signedObservation: Record<string, any> | null = null;
+    for (let index = 0; index < 50_000; index += 1) {
+      const candidate = roleIdentityObservation(repository, {
+        operationId,
+        taskId: "TASK-A",
+        role: "CAPTAIN",
+        threadId: "actual-crypto-context-thread",
+        hostId: "actual-crypto-context-host",
+        sessionId: `actual-crypto-context-session-${index}`,
+        launchId: null,
+      });
+      if (observation.containsSensitiveStringLeaves(
+        candidate.attestation.signature_base64url,
+      )) {
+        signedObservation = candidate;
+        break;
+      }
+    }
+    expect(signedObservation).not.toBeNull();
+    const planEnvelope = canaryPlan(repository.root, {
+      manifestFile: path.relative(
+        repository.root,
+        repository.manifestFile,
+      ),
+      role: "CAPTAIN",
+      taskId: "TASK-A",
+      browserCanaryReceipt: null,
+    });
+    const identityFile = path.join(
+      artifacts,
+      "crypto-context-identity.json",
+    );
+    writePrivateJson(identityFile, signedObservation);
+    expect(goalCommand([
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--event-id", operationId,
+      "--canary-plan-sha256", planEnvelope.canary_plan_sha256,
+      "--issuer-capability-file",
+      String(foreman.actor_capability_file),
+      "--identity-receipt", identityFile,
+      "--identity-receipt-sha256", fileSha256(identityFile),
+      "--json",
+    ], repository.root).value.challenge).toHaveLength(64);
+
+    const relocated = structuredClone(signedObservation);
+    relocated.goal_id =
+      signedObservation!.attestation.signature_base64url;
+    const relocatedUnsigned = { ...relocated };
+    delete relocatedUnsigned.record_sha256;
+    relocated.record_sha256 = hashObject(relocatedUnsigned);
+    const relocatedFile = path.join(
+      artifacts,
+      "crypto-context-relocated.json",
+    );
+    writePrivateJson(relocatedFile, relocated);
+    const beforeRelocated = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(() => goalCommand([
+      "prepare-probe-observation-challenge",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-A",
+      "--role", "CAPTAIN",
+      "--event-id", "captain-crypto-context-relocated",
+      "--canary-plan-sha256", planEnvelope.canary_plan_sha256,
+      "--issuer-capability-file",
+      String(foreman.actor_capability_file),
+      "--identity-receipt", relocatedFile,
+      "--identity-receipt-sha256", fileSha256(relocatedFile),
+      "--json",
+    ], repository.root)).toThrow(expect.objectContaining({
+      code: "CANARY_OBSERVATION_SENSITIVE_DATA",
+    }));
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeRelocated);
   });
 
   test("preserves the canonical source task for a two-task Goal-wide FOREMAN intent", () => {

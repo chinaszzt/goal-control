@@ -2742,10 +2742,9 @@ function prevalidateFreshForemanRecoveryTransaction(
   const paths = goalPaths(root, goalId);
   const batch = recoveryBatchState(paths, goalId, rootRecoveryId);
   if (batch.intent || batch.commit) return;
+  if (!bundleEntry) return;
   assertControl(
-    bundleEntry
-      && bundleEntry.bundle
-      && bundleEntry.bundle.intent,
+    bundleEntry.bundle && bundleEntry.bundle.intent,
     'ROLE_IDENTITY_INTENT_REQUIRED',
     'Goal recovery 必须消费 exact upstream role identity bundle',
   );

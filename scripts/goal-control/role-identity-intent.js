@@ -115,7 +115,6 @@ function assertActualIdentityAliases(record) {
 }
 
 function validateRoleIdentityObservationStructure(record) {
-  assertNoSensitiveStringLeaves(record);
   exactKeys(record, [
     'schema_version',
     'kind',
@@ -177,6 +176,12 @@ function validateRoleIdentityObservationStructure(record) {
     'ROLE_IDENTITY_OBSERVATION_INVALID',
     'role identity observation schema 非法',
   );
+  assertNoSensitiveStringLeaves(record, {
+    allowedExactFieldValues: {
+      signature_base64url:
+        record.attestation.signature_base64url,
+    },
+  });
   for (const [value, label] of [
     [record.operation_id, 'operation_id'],
     [record.goal_id, 'goal_id'],
@@ -351,7 +356,18 @@ function validateRoleIdentityObservation(options) {
 }
 
 function validateRoleIdentityIntent(value, options = {}) {
-  assertNoSensitiveStringLeaves(value);
+  assertNoSensitiveStringLeaves(value, {
+    allowedExactFieldValues: {
+      signature_base64url:
+        value
+        && value.identity_observation
+        && value.identity_observation.signed_record
+        && value.identity_observation.signed_record.attestation
+          ? value.identity_observation.signed_record.attestation
+            .signature_base64url
+          : null,
+    },
+  });
   const legacy = options.allowLegacy === true;
   const keys = [
     'schema_version',

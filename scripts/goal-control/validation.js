@@ -1641,9 +1641,23 @@ function validateEvent(event) {
     }
     assertNoSensitiveStringLeaves(
       v2Identity ? payload : payload.role_identity,
-      expectedProbeStableId === null
-        ? {}
-        : { allowedDerivedStableId: expectedProbeStableId },
+      {
+        ...(expectedProbeStableId === null
+          ? {}
+          : { allowedDerivedStableId: expectedProbeStableId }),
+        allowedExactFieldValues: {
+          attestation_signature_base64url:
+            payload.probe_observation
+              ? payload.probe_observation
+                .attestation_signature_base64url
+              : null,
+          attestation_public_key_spki_base64:
+            payload.probe_observation
+              ? payload.probe_observation
+                .attestation_public_key_spki_base64
+              : null,
+        },
+      },
     );
     if (event.type === 'REGISTER_ROLE') {
       const workerRole = ['DEV', 'REVIEW', 'RECEIPT']
@@ -1790,6 +1804,14 @@ function validateEvent(event) {
     );
     assertNoSensitiveStringLeaves(payload.probe_observation, {
       allowedDerivedStableId: expectedProbeStableId,
+      allowedExactFieldValues: {
+        attestation_signature_base64url:
+          payload.probe_observation
+            .attestation_signature_base64url,
+        attestation_public_key_spki_base64:
+          payload.probe_observation
+            .attestation_public_key_spki_base64,
+      },
     });
   }
   if (

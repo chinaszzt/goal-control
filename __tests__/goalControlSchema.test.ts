@@ -1427,6 +1427,9 @@ describe("goal-control machine contract schemas", () => {
       },
     };
     parity(recoveryEvent, true);
+    const emptyRecoveryScope = structuredClone(recoveryEvent);
+    emptyRecoveryScope.payload.goal_scope = {};
+    parity(emptyRecoveryScope, false);
     for (const field of [
       "capability_file_identity_sha256",
       "probe_observation",

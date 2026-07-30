@@ -37,12 +37,6 @@ const AUTHORIZATION_HEADER_RE =
   /(?:^|[\s,;])(?:authorization\s*:\s*)?(?:basic|bearer)\s+[A-Za-z0-9._~+/-]+=*(?:$|[\s,;])/i;
 const CREDENTIAL_URL_RE =
   /https?:\/\/(?:[^/\s@]+@|[^\s"']+[?&](?:access[_-]?token|api[_-]?key|password|passwd|client[_-]?secret|private[_-]?key|token|key|secret|auth(?:orization)?|credential)=)/i;
-const CRYPTOGRAPHIC_CAPABILITY_EXEMPT_FIELDS = new Set([
-  'attestation_public_key_spki_base64',
-  'attestation_signature_base64url',
-  'public_key_spki_base64',
-  'signature_base64url',
-]);
 const VALIDATED_ENUM_STRING_FIELDS = new Set([
   'adapter',
   'aggregate_disposition',
@@ -377,9 +371,6 @@ function sensitiveStringFinding(value, options = {}) {
         VALIDATED_ENUM_STRING_FIELDS.has(field)
           || DERIVED_CANONICAL_STRING_FIELDS.has(field)
       ) {
-        return;
-      }
-      if (CRYPTOGRAPHIC_CAPABILITY_EXEMPT_FIELDS.has(field)) {
         return;
       }
       if (
@@ -1131,9 +1122,6 @@ function validateReceipt(options) {
     'CANARY_OBSERVATION_BINDING_MISMATCH',
     'probe observation receipt stable ID binding 非法',
   );
-  assertNoSensitiveStringLeaves(receipt, {
-    allowedDerivedStableId: request.stable_id,
-  });
   const unsigned = { ...receipt };
   delete unsigned.receipt_binding_sha256;
   assertControl(
@@ -1152,6 +1140,13 @@ function validateReceipt(options) {
     'probe observation receipt plan/challenge/Goal/task/role/target binding 非法',
   );
   assertReceiptAttestation(receipt, hostAttestation);
+  assertNoSensitiveStringLeaves(receipt, {
+    allowedDerivedStableId: request.stable_id,
+    allowedExactFieldValues: {
+      signature_base64url:
+        receipt.receipt_attestation.signature_base64url,
+    },
+  });
   exactKeys(
     receipt.producer,
     ['attempt', 'host_id', 'namespace', 'thread_id'],
@@ -1329,6 +1324,12 @@ function validateReceipt(options) {
   });
   assertNoSensitiveStringLeaves(binding, {
     allowedDerivedStableId: request.stable_id,
+    allowedExactFieldValues: {
+      attestation_public_key_spki_base64:
+        binding.attestation_public_key_spki_base64,
+      attestation_signature_base64url:
+        binding.attestation_signature_base64url,
+    },
   });
   return binding;
 }
@@ -1456,9 +1457,6 @@ function assertLivePassBinding(
     'CANARY_OBSERVATION_BINDING_INVALID',
     'controller-held receipt stable ID 漂移',
   );
-  assertNoSensitiveStringLeaves(receipt, {
-    allowedDerivedStableId: validated.stable_id,
-  });
   const receiptUnsigned = { ...receipt };
   delete receiptUnsigned.receipt_binding_sha256;
   const hostAttestation = canonicalHostAttestation(
@@ -1472,6 +1470,13 @@ function assertLivePassBinding(
     'controller-held host attestation',
   );
   assertReceiptAttestation(receipt, hostAttestation);
+  assertNoSensitiveStringLeaves(receipt, {
+    allowedDerivedStableId: validated.stable_id,
+    allowedExactFieldValues: {
+      signature_base64url:
+        receipt.receipt_attestation.signature_base64url,
+    },
+  });
   const planEnvelope = parseJson(
     planCapture.bytes,
     'controller canary plan evidence',
