@@ -23,9 +23,37 @@ const DEFAULT_MAX_TTL_MS = 15 * 60 * 1000;
 const CHALLENGE_RE = /^[0-9a-f]{64}$/;
 const CONTROLLER_EVIDENCE_ID_RE =
   /^controller-evidence-v1-[0-9a-f]{64}$/;
-const CAPABILITY_VALUE_RE = /^[A-Za-z0-9_-]{43}$/;
+const CAPABILITY_VALUE_RE =
+  /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])/;
 const GITHUB_TOKEN_VALUE_RE =
-  /(?:^|[^A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})(?:$|[^A-Za-z0-9_])/i;
+  /(?:gh[pousr][_-][A-Za-z0-9_-]{8,}|github[_-]pat[_-][A-Za-z0-9_-]{8,}|xox[baprs][_-][A-Za-z0-9_-]{8,})/i;
+const GENERIC_CREDENTIAL_VALUE_RE =
+  /(?:^|[^A-Za-z0-9])(?:(?:(?:sk|pk|rk|api|auth|token|secret|bearer|credential|access[_-]key)[_-](?:live|test|prod|proj|key)?[_-]?)[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,}|glpat-[A-Za-z0-9_-]{8,}|hf_[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,}|SK[0-9a-f]{32}|SG\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})(?:$|[^A-Za-z0-9])/i;
+const PRIVATE_KEY_TEXT_RE =
+  /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/i;
+const CREDENTIAL_ASSIGNMENT_RE =
+  /(?:api[_-]?key|password|passwd|client[_-]?secret|private[_-]?key|access[_-]?token|access[_-]?key|token|authorization|credential)\s*[:=]\s*[^\s"'&]{4,}/i;
+const AUTHORIZATION_HEADER_RE =
+  /(?:^|[\s,;])(?:authorization\s*:\s*)?(?:basic|bearer)\s+[A-Za-z0-9._~+/-]+=*(?:$|[\s,;])/i;
+const CREDENTIAL_URL_RE =
+  /https?:\/\/(?:[^/\s@]+@|[^\s"']+[?&](?:access[_-]?token|api[_-]?key|password|passwd|client[_-]?secret|private[_-]?key|token|key|secret|auth(?:orization)?|credential)=)/i;
+const VALIDATED_ENUM_STRING_FIELDS = new Set([
+  'adapter',
+  'aggregate_disposition',
+  'aggregate_dispositions',
+  'disposition',
+  'kind',
+  'probe',
+  'producer_namespace',
+  'protocol',
+  'registration_gate',
+  'required_probes',
+  'role',
+  'schema',
+]);
+const DERIVED_CANONICAL_STRING_FIELDS = new Set([
+  'shell_command',
+]);
 const DISPOSITIONS = Object.freeze([
   'PASS',
   'PROVISIONAL_KNOWN_LIMITATION',
@@ -190,10 +218,13 @@ function readStableFile(file, options) {
     }`,
   );
   const before = fs.lstatSync(file, { bigint: true });
+  const allowedNlinks = Array.isArray(options.allowedNlinks)
+    ? options.allowedNlinks
+    : [1];
   assertControl(
     before.isFile()
       && !before.isSymbolicLink()
-      && Number(before.nlink) === 1
+      && allowedNlinks.includes(Number(before.nlink))
       && Number(before.mode & 0o7777n) === options.mode
       && Number(before.size) > 0
       && Number(before.size) <= options.maxBytes
@@ -262,6 +293,21 @@ function readStableFile(file, options) {
     return {
       bytes,
       sha256: `sha256:${sha256(bytes)}`,
+      file_identity_sha256: hashObject({
+        canonical_path_sha256: `sha256:${sha256(file)}`,
+        dev: openedAfter.dev.toString(),
+        ino: openedAfter.ino.toString(),
+        mode: Number(openedAfter.mode & 0o7777n),
+        uid: Number(openedAfter.uid),
+        size: Number(openedAfter.size),
+        mtime_ns: openedAfter.mtimeNs.toString(),
+        ...(options.stableInodeIdentity === true
+          ? {}
+          : {
+            nlink: Number(openedAfter.nlink),
+            ctime_ns: openedAfter.ctimeNs.toString(),
+          }),
+      }),
     };
   } finally {
     fs.closeSync(descriptor);
@@ -271,10 +317,10 @@ function readStableFile(file, options) {
 function parseJson(bytes, label) {
   try {
     return JSON.parse(bytes.toString('utf8'));
-  } catch (error) {
+  } catch {
     throw new ControlError(
       'CANARY_OBSERVATION_INVALID',
-      `${label} 不是合法 JSON: ${error.message}`,
+      `${label} 不是合法 JSON`,
     );
   }
 }
@@ -292,31 +338,85 @@ function assertNoSensitiveReceiptText(bytes) {
   );
 }
 
-function assertNoSensitiveStringLeaves(value) {
-  const visit = (current) => {
+function sensitiveStringFinding(value, options = {}) {
+  let finding = null;
+  const visit = (current, field = null) => {
+    if (finding) return;
     if (typeof current === 'string') {
-      assertControl(
-        !CAPABILITY_VALUE_RE.test(current)
-          && !GITHUB_TOKEN_VALUE_RE.test(current)
-          && !/(?:^|\s)(?:basic|bearer)\s+[A-Za-z0-9._~+/-]+=*(?:$|\s)/i
-            .test(current)
-          && !/https?:\/\/[^/\s@]+@/i.test(current)
-          && !/https?:\/\/[^\s"']+[?&](?:access_token|token|key|credential)=/i
-            .test(current),
-        'CANARY_OBSERVATION_SENSITIVE_DATA',
-        'probe observation receipt 禁止 token/cookie/credential URL/capability 原文',
-      );
+      if (
+        field === 'stable_id'
+          && typeof options.allowedDerivedStableId === 'string'
+          && current === options.allowedDerivedStableId
+      ) {
+        return;
+      }
+      if (
+        options.allowedExactFieldValues
+          && Object.prototype.hasOwnProperty.call(
+            options.allowedExactFieldValues,
+            field,
+          )
+          && (
+            current === options.allowedExactFieldValues[field]
+              || (
+                Array.isArray(options.allowedExactFieldValues[field])
+                  && options.allowedExactFieldValues[field]
+                    .includes(current)
+              )
+          )
+      ) {
+        return;
+      }
+      if (
+        VALIDATED_ENUM_STRING_FIELDS.has(field)
+          || DERIVED_CANONICAL_STRING_FIELDS.has(field)
+      ) {
+        return;
+      }
+      if (
+        CAPABILITY_VALUE_RE.test(current)
+      ) {
+        finding = { category: 'capability', field };
+      } else if (GITHUB_TOKEN_VALUE_RE.test(current)) {
+        finding = { category: 'provider_token', field };
+      } else if (GENERIC_CREDENTIAL_VALUE_RE.test(current)) {
+        finding = { category: 'generic_credential', field };
+      } else if (PRIVATE_KEY_TEXT_RE.test(current)) {
+        finding = { category: 'private_key', field };
+      } else if (CREDENTIAL_ASSIGNMENT_RE.test(current)) {
+        finding = { category: 'credential_assignment', field };
+      } else if (AUTHORIZATION_HEADER_RE.test(current)) {
+        finding = { category: 'authorization_header', field };
+      } else if (CREDENTIAL_URL_RE.test(current)) {
+        finding = { category: 'credential_url', field };
+      }
       return;
     }
     if (Array.isArray(current)) {
-      current.forEach(visit);
+      current.forEach((entry) => visit(entry, field));
       return;
     }
     if (current && typeof current === 'object') {
-      Object.values(current).forEach(visit);
+      Object.entries(current).forEach(([key, entry]) => {
+        visit(entry, key);
+      });
     }
   };
   visit(value);
+  return finding;
+}
+
+function containsSensitiveStringLeaves(value) {
+  return sensitiveStringFinding(value) !== null;
+}
+
+function assertNoSensitiveStringLeaves(value, options = {}) {
+  const finding = sensitiveStringFinding(value, options);
+  assertControl(
+    finding === null,
+    'CANARY_OBSERVATION_SENSITIVE_DATA',
+    `controller boundary 禁止 token/credential URL/private key/auth header/capability 原文 (${finding ? `${finding.category}/${finding.field || 'value'}` : 'unknown'})`,
+  );
 }
 
 function attestationPayload(receipt) {
@@ -907,6 +1007,9 @@ function validateReceipt(options) {
     'CANARY_OBSERVATION_STABLE_ID_MISMATCH',
     `probe observation stable ID 必须精确等于 ${expectedStableId}`,
   );
+  // stable_id is now controller-derived from the separately validated event
+  // ID. The recursive scan may exempt this exact derived field without
+  // allowing a caller-authored 43-character capability-shaped identity.
   const planCapture = readStableFile(request.plan_file, {
     label: 'canary plan',
     parentMode: 0o700,
@@ -914,12 +1017,23 @@ function validateReceipt(options) {
     maxBytes: MAX_PLAN_BYTES,
   });
   const planEnvelope = parseJson(planCapture.bytes, 'canary plan');
-  assertNoSensitiveStringLeaves(planEnvelope);
   const { plan, planSha256 } = validatePlan(
     planEnvelope,
     request.canary_plan_sha256,
     options,
   );
+  // shell_command is an exact controller-regenerated serialization of the
+  // separately scanned argv/environment leaves. Scan only after that
+  // canonical equality closes so the derived string cannot hide caller data.
+  assertNoSensitiveStringLeaves(planEnvelope, {
+    allowedExactFieldValues: {
+      repository_worktree: options.repositoryWorktree,
+      argv: [
+        options.repositoryWorktree,
+        options.invocationCwd || options.repositoryWorktree,
+      ],
+    },
+  });
   const {
     targetIdentitySha256,
     targetFingerprintSha256,
@@ -1002,8 +1116,12 @@ function validateReceipt(options) {
     receiptCapture.bytes,
     'probe observation receipt',
   );
-  assertNoSensitiveStringLeaves(receipt);
   exactKeys(receipt, RECEIPT_KEYS, 'probe observation receipt');
+  assertControl(
+    receipt.stable_id === request.stable_id,
+    'CANARY_OBSERVATION_BINDING_MISMATCH',
+    'probe observation receipt stable ID binding 非法',
+  );
   const unsigned = { ...receipt };
   delete unsigned.receipt_binding_sha256;
   assertControl(
@@ -1022,6 +1140,13 @@ function validateReceipt(options) {
     'probe observation receipt plan/challenge/Goal/task/role/target binding 非法',
   );
   assertReceiptAttestation(receipt, hostAttestation);
+  assertNoSensitiveStringLeaves(receipt, {
+    allowedDerivedStableId: request.stable_id,
+    allowedExactFieldValues: {
+      signature_base64url:
+        receipt.receipt_attestation.signature_base64url,
+    },
+  });
   exactKeys(
     receipt.producer,
     ['attempt', 'host_id', 'namespace', 'thread_id'],
@@ -1132,30 +1257,32 @@ function validateReceipt(options) {
     'CANARY_OBSERVATION_EVIDENCE_REQUIRED',
     'controller durable evidence directory 缺失',
   );
-  if (!fs.existsSync(options.evidenceDirectory)) {
-    ensureDir(options.evidenceDirectory);
-  }
-  fs.chmodSync(options.evidenceDirectory, 0o700);
   const durablePlanFile = path.join(options.evidenceDirectory, 'plan.json');
   const durableReceiptFile = path.join(
     options.evidenceDirectory,
     'receipt.json',
   );
-  for (const [file, bytes] of [
-    [durablePlanFile, planCapture.bytes],
-    [durableReceiptFile, receiptCapture.bytes],
-  ]) {
-    if (fs.existsSync(file)) {
-      assertControl(
-        `sha256:${sha256(fs.readFileSync(file))}`
-          === `sha256:${sha256(bytes)}`,
-        'CANARY_OBSERVATION_REPLAY_CONFLICT',
-        'controller durable evidence 已绑定不同 bytes',
-      );
-    } else {
-      atomicCreate(file, bytes);
+  if (options.persistEvidence !== false) {
+    if (!fs.existsSync(options.evidenceDirectory)) {
+      ensureDir(options.evidenceDirectory);
     }
-    fs.chmodSync(file, 0o600);
+    fs.chmodSync(options.evidenceDirectory, 0o700);
+    for (const [file, bytes] of [
+      [durablePlanFile, planCapture.bytes],
+      [durableReceiptFile, receiptCapture.bytes],
+    ]) {
+      if (fs.existsSync(file)) {
+        assertControl(
+          `sha256:${sha256(fs.readFileSync(file))}`
+            === `sha256:${sha256(bytes)}`,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'controller durable evidence 已绑定不同 bytes',
+        );
+      } else {
+        atomicCreate(file, bytes);
+      }
+      fs.chmodSync(file, 0o600);
+    }
   }
   const bindingUnsigned = {
     schema_version: 1,
@@ -1195,7 +1322,15 @@ function validateReceipt(options) {
     ...bindingUnsigned,
     binding_sha256: hashObject(bindingUnsigned),
   });
-  assertNoSensitiveStringLeaves(binding);
+  assertNoSensitiveStringLeaves(binding, {
+    allowedDerivedStableId: request.stable_id,
+    allowedExactFieldValues: {
+      attestation_public_key_spki_base64:
+        binding.attestation_public_key_spki_base64,
+      attestation_signature_base64url:
+        binding.attestation_signature_base64url,
+    },
+  });
   return binding;
 }
 
@@ -1317,7 +1452,11 @@ function assertLivePassBinding(
     'controller probe observation evidence',
   );
   assertNoSensitiveReceiptText(receiptCapture.bytes);
-  assertNoSensitiveStringLeaves(receipt);
+  assertControl(
+    receipt.stable_id === validated.stable_id,
+    'CANARY_OBSERVATION_BINDING_INVALID',
+    'controller-held receipt stable ID 漂移',
+  );
   const receiptUnsigned = { ...receipt };
   delete receiptUnsigned.receipt_binding_sha256;
   const hostAttestation = canonicalHostAttestation(
@@ -1331,6 +1470,13 @@ function assertLivePassBinding(
     'controller-held host attestation',
   );
   assertReceiptAttestation(receipt, hostAttestation);
+  assertNoSensitiveStringLeaves(receipt, {
+    allowedDerivedStableId: validated.stable_id,
+    allowedExactFieldValues: {
+      signature_base64url:
+        receipt.receipt_attestation.signature_base64url,
+    },
+  });
   const planEnvelope = parseJson(
     planCapture.bytes,
     'controller canary plan evidence',
@@ -1432,6 +1578,8 @@ module.exports = {
   PROTOCOL,
   RECEIPT_KIND,
   aggregateProbeResults,
+  assertNoSensitiveStringLeaves,
+  containsSensitiveStringLeaves,
   assertLivePassBinding,
   assertRequiredLiveBinding,
   controllerEvidenceReference,
@@ -1439,6 +1587,7 @@ module.exports = {
   protocolRequired,
   receiptOptions,
   requestMatchesBinding,
+  readStableFile,
   targetHashes,
   validateBinding,
   validateKnownLimitation,

@@ -54,6 +54,32 @@ function expressionSignature(node: AstNode | undefined): string {
 }
 
 describe("goal-control generation boundary hook surface", () => {
+  it("keeps accepted role identity replay on one descriptor-bound inventory capture", () => {
+    const source = readFileSync(
+      path.join(PRODUCTION_ROOT, "goal.js"),
+      "utf8",
+    );
+    const start = source.indexOf(
+      "function assertRoleIdentityAuthorityReplay(",
+    );
+    const end = source.indexOf(
+      "function roleIdentityRegistrationAuthorizedBy(",
+      start,
+    );
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const replay = source.slice(start, end);
+    expect(
+      replay.match(/roleIdentityInventory\(paths\)/g),
+    ).toHaveLength(1);
+    expect(replay).not.toContain(
+      "readRoleIdentityBundleEntryByOperation(",
+    );
+    expect(replay).toContain(
+      "const bundleEntry = inventoryEntry;",
+    );
+  });
+
   it("keeps every production hook assignment on the audited resolver allowlist", () => {
     const properties: string[] = [];
     const methods: string[] = [];
@@ -98,6 +124,8 @@ describe("goal-control generation boundary hook surface", () => {
       "scripts/goal-control/gate-adapters.js:call:gateGenerationBoundaryFaultHook",
       "scripts/goal-control/github-merge.js:generationBoundaryFault",
       "scripts/goal-control/github-merge.js:options.afterGenerationBeforeCallback",
+      "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
+      "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",
       "scripts/goal-control/goal.js:call:generationBoundaryFaultHook",

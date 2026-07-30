@@ -13,6 +13,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -379,6 +380,26 @@ function json(result: CliResult): Record<string, unknown> {
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
+function ordinaryFileSnapshot(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  if (!existsSync(root)) return snapshot;
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const entry = path.join(directory, name);
+      const stat = statSync(entry);
+      if (stat.isDirectory()) {
+        visit(entry);
+      } else if (stat.isFile()) {
+        snapshot[path.relative(root, entry)] = createHash("sha256")
+          .update(readFileSync(entry))
+          .digest("hex");
+      }
+    }
+  };
+  visit(root);
+  return snapshot;
+}
+
 function initGoal(fixture: GoalFixture): void {
   withInProcessGoalCliFixtureSetup(() => {
     const result = runCli(["init", "--manifest", fixture.manifest, "--json"], fixture.root, fixture.controlDir);
@@ -713,6 +734,36 @@ function submitEvent(
 function expectControlError(result: CliResult, code: string): void {
   expect(result.code).not.toBe(0);
   expect(`${result.stdout}\n${result.stderr}`).toContain(code);
+}
+
+function expectExactCliControlErrorNoEcho(
+  result: CliResult,
+  code: string,
+  message: string,
+  forbiddenValues: string[],
+): void {
+  expect(message.trim()).not.toHaveLength(0);
+  expect(result).toEqual({
+    code: 2,
+    stdout: "",
+    stderr: `goalctl[${code}]: ${message}\n`,
+  });
+  const serialized = JSON.stringify(result);
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
+}
+
+function expectSerializedSurfaceNoEcho(
+  value: unknown,
+  forbiddenValues: string[],
+): void {
+  const serialized = JSON.stringify(value);
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
 }
 
 type RecoverForemanOverrides = {
@@ -2068,6 +2119,18 @@ describe("scripts/goalctl.js", () => {
     );
     expect(firstRetry.code).toBe(0);
     const firstRetryBody = json(firstRetry);
+    const rawActorCapability = readFileSync(
+      String(firstRetryBody.actor_capability_file),
+      "utf8",
+    ).trim();
+    const rawCaptainCapability = readFileSync(
+      fixture.capabilities["TASK-A"].CAPTAIN as string,
+      "utf8",
+    ).trim();
+    expectSerializedSurfaceNoEcho(firstRetryBody, [
+      rawActorCapability,
+      rawCaptainCapability,
+    ]);
 
     apply(fixture, book, "ROLE_LOST", "CAPTAIN", {
       payload: {
@@ -2087,6 +2150,8 @@ describe("scripts/goalctl.js", () => {
     });
 
     unlinkSync(path.join(fixture.root, "docs", "protocol", "shared.md"));
+    const beforeHistoricalRetry =
+      ordinaryFileSnapshot(fixture.controlDir);
     const repeated = runCli(originalRegistration, fixture.root, fixture.controlDir);
     expect(repeated.code).toBe(0);
     const body = json(repeated);
@@ -2111,6 +2176,89 @@ describe("scripts/goalctl.js", () => {
     expect(body.task_nonce).toBe(firstRetryBody.task_nonce);
     expect(body.actor_capability_file).toBe(firstRetryBody.actor_capability_file);
     expect(existsSync(String(body.actor_capability_file))).toBe(true);
+    expectSerializedSurfaceNoEcho(body, [
+      rawActorCapability,
+      rawCaptainCapability,
+    ]);
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeHistoricalRetry);
+
+    const variantLaunchId = "launch-dev-response-loss-variant";
+    const variantLaunch = [...originalRegistration];
+    variantLaunch[variantLaunch.indexOf("--launch-id") + 1] =
+      variantLaunchId;
+    const beforeVariantLaunch =
+      ordinaryFileSnapshot(fixture.controlDir);
+    expectExactCliControlErrorNoEcho(
+      runCli(
+        variantLaunch,
+        fixture.root,
+        fixture.controlDir,
+      ),
+      "EVENT_ID_CONFLICT",
+      `registration event id ${eventId} 已被不同请求使用`,
+      [
+        rawActorCapability,
+        rawCaptainCapability,
+        variantLaunchId,
+      ],
+    );
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeVariantLaunch);
+
+    const syntheticReceipt = path.join(
+      fixture.root,
+      "synthetic-v2-receipt.json",
+    );
+    const syntheticPlan = path.join(
+      fixture.root,
+      "synthetic-v2-plan.json",
+    );
+    const syntheticReceiptBody =
+      "{\"rejected_sensitive_receipt\":\"ao01-receipt-secret-value\"}\n";
+    const syntheticPlanBody =
+      "{\"rejected_sensitive_plan\":\"ao01-plan-secret-value\"}\n";
+    writeFileSync(syntheticReceipt, syntheticReceiptBody);
+    writeFileSync(syntheticPlan, syntheticPlanBody);
+    const syntheticReceiptSha = createHash("sha256")
+      .update(readFileSync(syntheticReceipt))
+      .digest("hex");
+    const syntheticPlanSha = createHash("sha256")
+      .update(readFileSync(syntheticPlan))
+      .digest("hex");
+    const mixedRetry = [
+      ...originalRegistration,
+      "--probe-observation-receipt", syntheticReceipt,
+      "--probe-observation-receipt-sha256", syntheticReceiptSha,
+      "--probe-observation-plan", syntheticPlan,
+      "--probe-observation-plan-sha256", syntheticPlanSha,
+      "--probe-observation-stable-id",
+      "canary-observation-synthetic-legacy-retry",
+      "--probe-observation-challenge", "ab".repeat(32),
+    ];
+    const beforeMixedRetry =
+      ordinaryFileSnapshot(fixture.controlDir);
+    expectExactCliControlErrorNoEcho(
+      runCli(
+        mixedRetry,
+        fixture.root,
+        fixture.controlDir,
+      ),
+      "EVENT_ID_CONFLICT",
+      `registration event id ${eventId} 已被不同请求使用`,
+      [
+        rawActorCapability,
+        rawCaptainCapability,
+        syntheticReceiptBody.trim(),
+        syntheticPlanBody.trim(),
+        "ao01-receipt-secret-value",
+        "ao01-plan-secret-value",
+        "canary-observation-synthetic-legacy-retry",
+        "ab".repeat(32),
+      ],
+    );
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeMixedRetry);
   });
 
   it("recovers one sealed registration capability and nonce after child exit and authorizer lease expiry", () => {

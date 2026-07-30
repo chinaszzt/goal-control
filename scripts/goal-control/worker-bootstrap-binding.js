@@ -18,6 +18,8 @@ const DEV_HEAD_ADVANCE_EVENTS = Object.freeze([
   'REOPEN_DEV',
 ]);
 const CHALLENGE_RE = /^[0-9a-f]{64}$/;
+const REPO_PATH_RE =
+  /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\/\/)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const BINDING_KEYS = Object.freeze([
   'binding_sha256',
   'branch',
@@ -56,6 +58,7 @@ function exactKeys(value, expected, label) {
 function canonicalAbsolutePath(value, label) {
   assertControl(
     typeof value === 'string'
+      && value.length <= 2000
       && path.isAbsolute(value)
       && path.normalize(value) === value,
     'WORKER_BOOTSTRAP_BINDING_INVALID',
@@ -111,10 +114,10 @@ function validateWorkerBootstrapBinding(value, label = 'worker bootstrap binding
   );
   assertControl(
     typeof value.canary_policy.path === 'string'
-      && value.canary_policy.path.length > 0
-      && !path.isAbsolute(value.canary_policy.path),
+      && value.canary_policy.path.length <= 500
+      && REPO_PATH_RE.test(value.canary_policy.path),
     'WORKER_BOOTSTRAP_BINDING_INVALID',
-    `${label}.canary_policy.path 必须是 repo-relative path`,
+    `${label}.canary_policy.path 必须是 canonical repo-relative path`,
   );
   normalizeHash(
     value.canary_policy.sha256,

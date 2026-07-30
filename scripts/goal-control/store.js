@@ -8956,6 +8956,40 @@ function withLock(root, callback, options = {}) {
           : 'transaction preflight 改写了 control root',
       );
     }
+    if (
+      entryGeneration % 2 === 0
+        && typeof options.readOnlyResultBeforeGeneration === 'function'
+    ) {
+      const readOnlyResult =
+        options.readOnlyResultBeforeGeneration();
+      if (
+        readOnlyResult
+          && readOnlyResult.completed === true
+      ) {
+        assertOwnedDirectory(
+          lockDir,
+          WRITER_LOCK_KIND,
+          lockOwner,
+        );
+        assertControl(
+          readRootGeneration(root) === entryGeneration
+            && hashObject(readRootGenerationRecord(root))
+              === entryGenerationRecordSha256
+            && readOddRecoveryStateVector(root) === entryStateVector
+            && readPristinePayloadVector(root, {
+              atomicTransportInspection: entryAtomicTransport,
+            }) === entryPristinePayloadVector,
+          'STORE_TRANSACTION_PREFLIGHT_MUTATED',
+          'read-only transaction completion 改写了 control root',
+        );
+        releaseOwnedDirectory(
+          lockDir,
+          WRITER_LOCK_KIND,
+          lockOwner,
+        );
+        return readOnlyResult.value;
+      }
+    }
     if (entryGeneration % 2 === 1 && !entryGenerationRecord.legacy) {
       entryGenerationRecord = normalizeOddGenerationAtomicTransport(
         root,

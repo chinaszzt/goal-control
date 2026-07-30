@@ -63,6 +63,7 @@ const {
   goalMergeTargetReservations,
   historicalTransactionKeySha256,
   isHistoricalTransactionRetry,
+  isOddTransactionRetry,
   isPreWitnessTransactionRetry,
   readJsonIfExists,
   sealChainedRecord,
@@ -74,6 +75,7 @@ const {
 const {
   assertFullSha,
   assertIsolatedTestMode,
+  canonicalJson,
   controlRoot,
   git,
   hashFile,
@@ -118,10 +120,21 @@ const {
 const {
   assertRequiredLiveBinding: assertRequiredLiveProbeObservationBinding,
   protocolRequired: probeObservationProtocolRequired,
+  readStableFile,
   receiptOptions: probeObservationOptions,
   requestMatchesBinding: probeObservationRequestMatchesBinding,
   validateReceipt: validateProbeObservationReceipt,
 } = require('./canary-observation-receipt');
+const {
+  controllerOpaqueId,
+  platformOpaqueId,
+  publicRoleIdentityIntent,
+  roleIdentitySemanticSlotSha256,
+  validateLegacyRoleIdentityIntent,
+  validateRoleIdentityIntent,
+  validateRoleIdentityObservation,
+  verifyRoleIdentityObservationRecord,
+} = require('./role-identity-intent');
 const {
   assertWorkerBootstrapCurrentWorktree,
   assertWorkerBootstrapLaunchBinding,
@@ -133,6 +146,7 @@ const {
   workerBootstrapRequestMatchesBinding,
 } = require('./worker-bootstrap-binding');
 const {
+  ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
   abandonmentReceiptsForTask,
   abandonP1CommitRef,
   acceptedP1Event,
@@ -688,6 +702,8 @@ function goalPaths(root, goalId) {
     registrationIntents: path.join(dir, 'registration-intents'),
     probeObservationChallenges:
       path.join(dir, 'probe-observation-challenges'),
+    roleIdentityIntents:
+      path.join(dir, 'probe-observation-challenges'),
     probeObservationEvidence:
       path.join(dir, 'probe-observation-evidence'),
   };
@@ -701,18 +717,21 @@ function probeObservationChallengeFile(paths, eventId) {
 }
 
 function probeObservationChallengeRecord(paths, options, planSha256) {
-  const file = probeObservationChallengeFile(
+  const bundle = readRoleIdentityBundleByOperation(
     paths,
     options.registrationEventId,
   );
-  assertControl(
-    fs.existsSync(file),
-    'CANARY_OBSERVATION_CHALLENGE_REQUIRED',
-    '必须先由 controller prepare-probe-observation-challenge',
+  const legacyFile = probeObservationChallengeFile(
+    paths,
+    options.registrationEventId,
   );
-  const record = readJson(file, 'probe observation challenge');
+  const record = bundle
+    ? bundle.challenge
+    : fs.existsSync(legacyFile)
+      ? readJson(legacyFile, 'probe observation challenge')
+      : null;
   assertControl(
-    record.canary_plan_sha256 === planSha256,
+    record && record.canary_plan_sha256 === planSha256,
     'CANARY_OBSERVATION_CHALLENGE_INVALID',
     'controller challenge 未绑定当前 canary plan',
   );
@@ -723,20 +742,1505 @@ function publicProbeObservationChallenge(record) {
   return JSON.parse(JSON.stringify(record));
 }
 
+function roleIdentityIntentFile(paths, operationId) {
+  return path.join(
+    paths.roleIdentityIntents,
+    `${sha256(operationId)}.role-identity-intent.json`,
+  );
+}
+
+function roleIdentityBundleFile(paths, semanticSlotSha256) {
+  const digest = normalizeHash(
+    semanticSlotSha256,
+    'role identity semantic slot sha256',
+  ).slice('sha256:'.length);
+  return path.join(
+    paths.roleIdentityIntents,
+    `${digest}.role-identity-bundle.json`,
+  );
+}
+
+function validateRoleIdentityBundle(value) {
+  assertControl(
+    value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([
+        'bundle_sha256',
+        'challenge',
+        'intent',
+        'kind',
+        'operation_id',
+        'schema_version',
+        'semantic_slot_sha256',
+      ])
+      && value.schema_version === 2
+      && value.kind === 'ROLE_IDENTITY_CHALLENGE_BUNDLE'
+      && typeof value.challenge === 'object'
+      && value.challenge !== null,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle 非法',
+  );
+  const intent = validateRoleIdentityIntent(value.intent);
+  const challengeKeys = [
+    'schema_version',
+    'kind',
+    'goal_id',
+    'task_id',
+    'role',
+    'thread_id',
+    'host_id',
+    'attempt',
+    'registration_event_id',
+    'canary_plan_sha256',
+    'producer_namespace',
+    'issuer_capability_sha256',
+    'attestation_algorithm',
+    'attestation_key_id',
+    'attestation_public_key_sha256',
+    'challenge',
+    'issued_at',
+    'expires_at',
+    'record_sha256',
+  ];
+  assertControl(
+    JSON.stringify(Object.keys(value.challenge).sort())
+      === JSON.stringify(challengeKeys.sort())
+      && value.challenge.schema_version === 1
+      && value.challenge.kind === 'PROBE_OBSERVATION_CHALLENGE'
+      && ['HOST_ADAPTER', 'ISOLATED_TEST_FAKE'].includes(
+        value.challenge.producer_namespace,
+      )
+      && value.challenge.attestation_algorithm === 'ED25519'
+      && Number.isSafeInteger(value.challenge.attempt)
+      && value.challenge.attempt > 0
+      && /^[0-9a-f]{64}$/.test(value.challenge.challenge || '')
+      && /^[0-9a-f]{64}$/.test(
+        value.challenge.issuer_capability_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.canary_plan_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.attestation_public_key_sha256 || '',
+      )
+      && /^sha256:[0-9a-f]{64}$/.test(
+        value.challenge.record_sha256 || '',
+      )
+      && /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/
+        .test(value.challenge.issued_at || '')
+      && new Date(Date.parse(value.challenge.issued_at)).toISOString()
+        === value.challenge.issued_at
+      && /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/
+        .test(value.challenge.expires_at || '')
+      && new Date(Date.parse(value.challenge.expires_at)).toISOString()
+        === value.challenge.expires_at,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle challenge schema 非法',
+  );
+  for (const [candidate, label] of [
+    [value.operation_id, 'operation_id'],
+    [value.challenge.goal_id, 'challenge.goal_id'],
+    [value.challenge.task_id, 'challenge.task_id'],
+    [
+      value.challenge.registration_event_id,
+      'challenge.registration_event_id',
+    ],
+    [value.challenge.attestation_key_id, 'challenge.attestation_key_id'],
+  ]) {
+    controllerOpaqueId(candidate, `role identity bundle ${label}`);
+  }
+  platformOpaqueId(
+    value.challenge.thread_id,
+    'role identity bundle challenge.thread_id',
+  );
+  platformOpaqueId(
+    value.challenge.host_id,
+    'role identity bundle challenge.host_id',
+  );
+  const unsignedChallenge = { ...value.challenge };
+  delete unsignedChallenge.record_sha256;
+  const unsignedBundle = { ...value };
+  delete unsignedBundle.bundle_sha256;
+  assertControl(
+    value.operation_id === intent.operation_id
+      && value.semantic_slot_sha256 === intent.semantic_slot_sha256
+      && value.challenge.registration_event_id === intent.operation_id
+      && value.challenge.goal_id === intent.goal_id
+      && value.challenge.task_id === intent.task_id
+      && value.challenge.role === intent.role
+      && value.challenge.thread_id === intent.thread_id
+      && value.challenge.host_id === intent.host_id
+      && value.challenge.attempt === intent.attempt
+      && value.challenge.issuer_capability_sha256
+        === intent.issuer_authority.capability_sha256
+      && value.challenge.attestation_key_id
+        === intent.identity_observation.attestation_key_id
+      && value.challenge.attestation_public_key_sha256
+        === intent.identity_observation.signed_record
+          .attestation.public_key_sha256
+      && value.challenge.record_sha256 === hashObject(unsignedChallenge)
+      && value.bundle_sha256 === hashObject(unsignedBundle),
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity atomic bundle hash/binding 非法',
+  );
+  return {
+    ...JSON.parse(JSON.stringify(value)),
+    intent,
+  };
+}
+
+function readPrivateRoleIdentityJson(file, label, withIdentity = false) {
+  const trusted = readStableFile(file, {
+    label,
+    parentMode: 0o700,
+    mode: 0o600,
+    maxBytes: 512 * 1024,
+  });
+  try {
+    const value = JSON.parse(trusted.bytes.toString('utf8'));
+    return withIdentity
+      ? {
+        value,
+        file_identity_sha256:
+          trusted.file_identity_sha256,
+      }
+      : value;
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `${label} JSON 非法`,
+    );
+  }
+}
+
+function capabilityFileIdentitySha256(file, label) {
+  return readStableFile(file, {
+    label,
+    parentMode: 0o700,
+    mode: 0o600,
+    maxBytes: 512,
+    allowedNlinks: [1, 2],
+    stableInodeIdentity: true,
+  }).file_identity_sha256;
+}
+
+function roleIdentityBundles(paths) {
+  if (!fs.existsSync(paths.roleIdentityIntents)) return [];
+  ensurePrivateDirectory(paths.roleIdentityIntents, { repair: false });
+  const names = fs.readdirSync(paths.roleIdentityIntents).sort();
+  for (const name of names) {
+    assertControl(
+      /^[0-9a-f]{64}\.(?:json|role-identity-bundle\.json|role-identity-intent\.json)$/
+        .test(name),
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity inventory unknown filename sha256=${sha256(name)}`,
+    );
+  }
+  return names
+    .filter((name) => (
+      /^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name)
+    ))
+    .map((name) => {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const trusted = readPrivateRoleIdentityJson(
+        file,
+        'role identity atomic bundle',
+        true,
+      );
+      const bundle = validateRoleIdentityBundle(
+        trusted.value,
+      );
+      assertControl(
+        file === roleIdentityBundleFile(
+          paths,
+          bundle.semantic_slot_sha256,
+        ),
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        'role identity atomic bundle path binding 非法',
+      );
+      return {
+        file,
+        bundle,
+        file_identity_sha256:
+          trusted.file_identity_sha256,
+      };
+    });
+}
+
+function roleIdentityInventory(paths) {
+  if (!fs.existsSync(paths.roleIdentityIntents)) return [];
+  ensurePrivateDirectory(paths.roleIdentityIntents, { repair: false });
+  const inventory = [];
+  for (const name of fs.readdirSync(paths.roleIdentityIntents).sort()) {
+    if (/^[0-9a-f]{64}\.json$/.test(name)) continue;
+    if (/^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name)) {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const trusted = readPrivateRoleIdentityJson(
+        file,
+        'role identity atomic bundle',
+        true,
+      );
+      const bundle = validateRoleIdentityBundle(
+        trusted.value,
+      );
+      assertControl(
+        name === path.basename(
+          roleIdentityBundleFile(
+            paths,
+            bundle.semantic_slot_sha256,
+          ),
+        ),
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        `role identity bundle path binding sha256=${sha256(name)} 非法`,
+      );
+      inventory.push({
+        format: 'BUNDLE_V2',
+        file,
+        operation_id: bundle.operation_id,
+        semantic_slot_sha256: bundle.semantic_slot_sha256,
+        intent: bundle.intent,
+        bundle,
+        file_identity_sha256:
+          trusted.file_identity_sha256,
+      });
+      continue;
+    }
+    if (/^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name)) {
+      const file = path.join(paths.roleIdentityIntents, name);
+      const intent = validateLegacyRoleIdentityIntent(
+        readPrivateRoleIdentityJson(
+          file,
+          'legacy role identity intent',
+        ),
+      );
+      assertControl(
+        name === `${sha256(intent.operation_id)}.role-identity-intent.json`,
+        'ROLE_IDENTITY_INTENT_INVALID',
+        `legacy role identity path binding sha256=${sha256(name)} 非法`,
+      );
+      inventory.push({
+        format: 'LEGACY_V1',
+        file,
+        operation_id: intent.operation_id,
+        semantic_slot_sha256:
+          roleIdentitySemanticSlotSha256(
+            intent,
+            { allowLegacy: true },
+          ),
+        intent,
+        bundle: null,
+      });
+      continue;
+    }
+    assertControl(
+      false,
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity inventory unknown filename sha256=${sha256(name)}`,
+    );
+  }
+  return inventory;
+}
+
+function roleIdentityOperationReservation(paths, operationId) {
+  const matches = roleIdentityInventory(paths).filter(
+    (entry) => entry.operation_id === operationId,
+  );
+  assertControl(
+    matches.length <= 1,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity operation namespace 存在重复 durable authority',
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function roleIdentityConsumerAuthorizedBy(intent, meta) {
+  if (intent.issuer_authority.kind === 'BOOTSTRAP') {
+    return meta && typeof meta.bootstrap_capability_file === 'string'
+      ? {
+        role: 'BOOTSTRAP',
+        capability_file: meta.bootstrap_capability_file,
+      }
+      : null;
+  }
+  if (intent.issuer_authority.kind === 'GOAL_RECOVERY') {
+    return meta
+      && typeof meta.foreman_recovery_capability_file === 'string'
+      ? {
+        role: 'GOAL_RECOVERY',
+        capability_file: meta.foreman_recovery_capability_file,
+      }
+      : null;
+  }
+  return {
+    role: intent.issuer_authority.role,
+    thread_id: intent.issuer_authority.thread_id,
+    host_id: intent.issuer_authority.host_id,
+    attempt: intent.issuer_authority.attempt,
+  };
+}
+
+function exactRoleIdentityConsumer(entry, event, meta = null) {
+  const binding = event
+    && event.payload
+    && event.payload.role_identity;
+  const intent = entry && entry.intent;
+  const bundle = entry && entry.bundle;
+  const authorizedBy = intent && bundle
+    ? roleIdentityConsumerAuthorizedBy(intent, meta)
+    : event && event.payload && event.payload.authorized_by;
+  const probe = event
+    && event.payload
+    && event.payload.probe_observation;
+  const expectedBinding = intent && !bundle
+    ? {
+      protocol: 'goalctl-role-identity-intent-v1',
+      operation_id: intent.operation_id,
+      intent_sha256: intent.intent_sha256,
+      session_id: intent.session_id,
+      thread_id: intent.thread_id,
+      host_id: intent.host_id,
+      attempt: intent.attempt,
+      launch_id: intent.launch_id,
+      identity_observation_receipt_sha256:
+        intent.identity_observation.receipt_sha256,
+    }
+    : bundle && intent && authorizedBy && probe
+      ? {
+      protocol: 'goalctl-role-identity-intent-v2',
+      operation_id: intent.operation_id,
+      intent_sha256: intent.intent_sha256,
+      session_id: intent.session_id,
+      thread_id: intent.thread_id,
+      host_id: intent.host_id,
+      attempt: intent.attempt,
+      launch_id: intent.launch_id,
+      identity_observation_receipt_sha256:
+        intent.identity_observation.receipt_sha256,
+      semantic_slot_sha256: intent.semantic_slot_sha256,
+      bundle_sha256: bundle.bundle_sha256,
+      bundle_file_identity_sha256:
+        entry.file_identity_sha256,
+      issuer_authority_sha256:
+        hashObject(intent.issuer_authority),
+      identity_observation_record_sha256:
+        intent.identity_observation.record_sha256,
+      identity_observation_receipt_file_identity_sha256:
+        intent.identity_observation.receipt_file_identity_sha256,
+      worker_bootstrap_binding_sha256:
+        intent.identity_observation.worker_bootstrap_binding_sha256,
+      worker_bootstrap_authority_sha256:
+        intent.worker_bootstrap_authority === null
+          ? null
+          : hashObject(intent.worker_bootstrap_authority),
+      state_revision: intent.state_revision,
+      control_epoch: intent.control_epoch,
+      packet_revision: intent.packet.revision,
+      packet_sha256: intent.packet.sha256,
+      base_head: intent.base_head,
+      full_head: intent.full_head,
+      task_cycle: intent.task_cycle,
+      challenge_record_sha256: bundle.challenge.record_sha256,
+      probe_observation_binding_sha256: probe.binding_sha256,
+      registration_authorized_by_sha256: hashObject(authorizedBy),
+      }
+      : null;
+  return Boolean(
+    entry
+      && event
+      && [
+        'REGISTER_ROLE',
+        'RECOVER_EXPIRED_FOREMAN',
+        'PROBE_OBSERVATION_REFRESHED',
+      ]
+        .includes(event.type)
+      && (
+        event.type === 'RECOVER_EXPIRED_FOREMAN'
+          ? (
+            event.payload
+              && event.payload.root_recovery_id === entry.operation_id
+              && event.event_id === (
+                event.task_id === entry.intent.task_id
+                  ? entry.operation_id
+                  : recoveryEventId(
+                    entry.operation_id,
+                    event.task_id,
+                  )
+              )
+              && Array.isArray(event.payload.scope_task_ids)
+              && event.payload.scope_task_ids.includes(event.task_id)
+          )
+          : event.event_id === entry.operation_id
+      )
+      && event.goal_id === entry.intent.goal_id
+      && (
+        event.type === 'RECOVER_EXPIRED_FOREMAN'
+          || event.task_id === entry.intent.task_id
+      )
+      && binding
+      && expectedBinding
+      && Object.keys(expectedBinding).every(
+        (key) => binding[key] === expectedBinding[key],
+      )
+      && (
+        !bundle
+          ? event.type !== 'PROBE_OBSERVATION_REFRESHED'
+          : event.type === 'PROBE_OBSERVATION_REFRESHED'
+          ? entry.intent.issuer_authority.kind === 'CURRENT_SESSION'
+          : event.type === 'RECOVER_EXPIRED_FOREMAN'
+            ? entry.intent.issuer_authority.kind === 'GOAL_RECOVERY'
+            : entry.intent.issuer_authority.kind !== 'CURRENT_SESSION'
+      )
+      && (
+        event.type !== 'PROBE_OBSERVATION_REFRESHED'
+          || (
+            event.payload.role === entry.intent.role
+              && event.payload.attempt === entry.intent.attempt
+              && event.payload.probe_observation
+              && event.payload.probe_observation.thread_id
+                === entry.intent.thread_id
+              && event.payload.probe_observation.host_id
+                === entry.intent.host_id
+              && event.payload.probe_observation.attempt
+                === entry.intent.attempt
+          )
+      )
+  );
+}
+
+function assertRoleIdentityOperationAvailable(paths, operationId) {
+  assertControl(
+    roleIdentityOperationReservation(paths, operationId) === null,
+    'EVENT_ID_RESERVED',
+    'event id 已由 append-only role identity authority 占用',
+  );
+}
+
+function assertRoleIdentityEventWriterClassified(paths, event, meta = null) {
+  const directReservation = roleIdentityOperationReservation(
+    paths,
+    event.event_id,
+  );
+  const stableOperationId = event.type === 'RECOVER_EXPIRED_FOREMAN'
+    && event.payload
+    && typeof event.payload.root_recovery_id === 'string'
+    ? event.payload.root_recovery_id
+    : event.event_id;
+  const reservation = stableOperationId === event.event_id
+    ? directReservation
+    : roleIdentityOperationReservation(paths, stableOperationId);
+  assertControl(
+    (
+      directReservation === null
+        || directReservation.operation_id === stableOperationId
+    )
+      && (
+        reservation === null
+          || exactRoleIdentityConsumer(reservation, event, meta)
+      ),
+    'EVENT_ID_RESERVED',
+    'event id 已由 append-only role identity authority 占用',
+  );
+}
+
+function readRoleIdentityBundleEntryByOperation(paths, operationId) {
+  const matches = roleIdentityBundles(paths)
+    .filter(({ bundle }) => bundle.operation_id === operationId);
+  assertControl(
+    matches.length <= 1,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'role identity operation 出现多个 atomic bundle',
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function readRoleIdentityBundleByOperation(paths, operationId) {
+  const entry = readRoleIdentityBundleEntryByOperation(
+    paths,
+    operationId,
+  );
+  return entry ? entry.bundle : null;
+}
+
+function readRoleIdentityIntent(paths, operationId) {
+  const bundle = readRoleIdentityBundleByOperation(paths, operationId);
+  if (bundle) return bundle.intent;
+  const file = roleIdentityIntentFile(paths, operationId);
+  if (!fs.existsSync(file)) return null;
+  return validateLegacyRoleIdentityIntent(
+    readPrivateRoleIdentityJson(file, 'legacy role identity intent'),
+  );
+}
+
+function controllerDerivedRoleAttempt(loaded, taskId, role) {
+  const state = loaded.snapshot.tasks[taskId];
+  assertControl(state, 'UNKNOWN_TASK', `未知 task ${taskId}`);
+  if (role === 'FOREMAN' && !state.sessions.FOREMAN) {
+    const lineage = Object.values(loaded.snapshot.tasks || {})
+      .map((candidate) => candidate.sessions && candidate.sessions.FOREMAN)
+      .filter(Boolean);
+    if (lineage.length > 0) {
+      const attempt = Math.max(
+        ...lineage.map((session) => session.attempt),
+      );
+      const current = lineage.filter(
+        (session) => session.attempt === attempt,
+      );
+      assertControl(
+        current.every((session) => (
+          session.thread_id === current[0].thread_id
+            && session.host_id === current[0].host_id
+        )),
+        'GOAL_FOREMAN_LINEAGE_DIVERGED',
+        `Goal FOREMAN attempt=${attempt} identity 分叉`,
+      );
+      return attempt;
+    }
+  }
+  const current = state.sessions[role] || null;
+  if (current && ['active', 'idle'].includes(current.status)) {
+    return current.attempt;
+  }
+  const attempts = [
+    ...(current ? [current.attempt] : []),
+    ...((state.session_history && state.session_history[role]) || [])
+      .map((session) => session.attempt),
+  ].filter((attempt) => Number.isSafeInteger(attempt) && attempt > 0);
+  return attempts.length === 0 ? 1 : Math.max(...attempts) + 1;
+}
+
+function canonicalForemanRecoveryLineage(loaded, targetTaskId) {
+  const scope = foremanRecoveryScope(loaded);
+  const allSessions = Object.values(loaded.snapshot.tasks || {})
+    .flatMap((task) => [
+      task.sessions && task.sessions.FOREMAN,
+      ...((task.session_history
+        && task.session_history.FOREMAN) || []),
+    ])
+    .filter(Boolean);
+  assertControl(
+    allSessions.length > 0
+      && allSessions.every((session) => (
+        Number.isSafeInteger(session.attempt)
+          && session.attempt > 0
+      )),
+    'GOAL_FOREMAN_LINEAGE_DIVERGED',
+    'Goal recovery identity 缺 safe predecessor FOREMAN attempt',
+  );
+  const predecessorAttempt = Math.max(
+    ...allSessions.map((session) => session.attempt),
+  );
+  assertControl(
+    predecessorAttempt < Number.MAX_SAFE_INTEGER,
+    'GOAL_FOREMAN_LINEAGE_DIVERGED',
+    'Goal recovery successor attempt 超出 safe integer',
+  );
+  const active = scope.tasks.filter((binding) => (
+    binding.phase !== 'ARCHIVED' && binding.foreman
+  ));
+  const archived = scope.tasks.filter((binding) => (
+    binding.phase === 'ARCHIVED'
+      && binding.foreman
+      && binding.foreman.attempt === predecessorAttempt
+  ));
+  const target = scope.tasks.find(
+    (binding) => binding.task_id === targetTaskId,
+  );
+  assertControl(
+    target,
+    'UNKNOWN_TASK',
+    `未知 task ${targetTaskId}`,
+  );
+  const sources = active.length > 0 ? active : archived;
+  assertControl(
+    sources.length > 0
+      && sources.every((binding) => (
+        binding.foreman.attempt === predecessorAttempt
+      )),
+    'GOAL_FOREMAN_LINEAGE_DIVERGED',
+    'Goal recovery predecessor lineage attempt 分叉',
+  );
+  const anchor = sources[0].foreman;
+  const anchorState =
+    loaded.snapshot.tasks[sources[0].task_id];
+  const anchorSession = anchorState.sessions.FOREMAN;
+  const anchorIdentity = anchorSession.role_identity || null;
+  const anchorRecoveryRoot =
+    anchorSession.recovery_event_id || null;
+  assertControl(
+    sources.every((binding) => {
+      const session =
+        loaded.snapshot.tasks[binding.task_id].sessions.FOREMAN;
+      const identity = session.role_identity || null;
+      const recoveryRoot = session.recovery_event_id || null;
+      return session.thread_id === anchorSession.thread_id
+        && session.host_id === anchorSession.host_id
+        && session.attempt === anchorSession.attempt
+        && session.capability_file === anchorSession.capability_file
+        && session.capability_sha256 === anchorSession.capability_sha256
+        && session.capability_file_identity_sha256
+          === anchorSession.capability_file_identity_sha256
+        && Boolean(identity) === Boolean(anchorIdentity)
+        && (
+          !identity
+            || (
+              identity.session_id === anchorIdentity.session_id
+                && (
+                  recoveryRoot === null
+                    || (
+                      anchorRecoveryRoot !== null
+                        && recoveryRoot === anchorRecoveryRoot
+                        && identity.operation_id === recoveryRoot
+                        && anchorIdentity.operation_id
+                          === anchorRecoveryRoot
+                    )
+                )
+            )
+        );
+    }),
+    'GOAL_FOREMAN_LINEAGE_DIVERGED',
+    'Goal recovery predecessor identity/capability/root lineage 分叉',
+  );
+  if (active.length > 0) {
+    assertControl(
+      active.length === scope.tasks.filter((binding) => (
+        binding.phase !== 'ARCHIVED' && binding.foreman
+      )).length
+        && target.foreman,
+      'GOAL_FOREMAN_LINEAGE_DIVERGED',
+      'active Goal recovery target/source scope 模糊',
+    );
+  } else {
+    assertControl(
+      target.phase !== 'ARCHIVED'
+        && !target.foreman,
+      'GOAL_FOREMAN_ADOPTION_TARGET_INVALID',
+      'archived FOREMAN adoption target 必须未归档且无 local FOREMAN',
+    );
+  }
+  return {
+    scope,
+    predecessorAttempt,
+    successorAttempt: predecessorAttempt + 1,
+    sourceBindings: sources,
+    predecessorSession: {
+      ...anchorSession,
+      source_task_id: sources[0].task_id,
+    },
+    archivedAdoption: active.length === 0,
+  };
+}
+
+function workerRoleIdentityRegistrationEligible(state, role) {
+  if (role === 'DEV') {
+    return state.phase === 'P1_COMMITTED'
+      || state.phase === 'RECEIPT_FAILED'
+      || (
+        state.phase === 'DEV_ACTIVE'
+          && state.recovery
+          && state.recovery.role === 'DEV'
+      );
+  }
+  if (role === 'REVIEW') {
+    return ['DEV_READY', 'RECEIPT_FAILED'].includes(state.phase)
+      || (
+        state.phase === 'REVIEW_ACTIVE'
+          && state.recovery
+          && state.recovery.role === 'REVIEW'
+      );
+  }
+  if (role === 'RECEIPT') {
+    return state.phase === 'REVIEW_PASS'
+      || (
+        state.phase === 'RECEIPT_ACTIVE'
+          && state.recovery
+          && state.recovery.role === 'RECEIPT'
+      );
+  }
+  return true;
+}
+
+function challengeIssuerAuthority(loaded, options, supplied) {
+  const state = loaded.snapshot.tasks[options.taskId];
+  const now = runtimeNowMilliseconds();
+  const sessions = Object.entries(loaded.snapshot.tasks || {})
+    .flatMap(([sourceTaskId, task]) => (
+      Object.values(task.sessions || {}).map((session) => ({
+        ...session,
+        source_task_id: sourceTaskId,
+      }))
+    ))
+    .filter((session) => (
+      session.capability_sha256 === supplied.sha256
+        && session.capability_file === supplied.file
+        && session.capability_file_identity_sha256
+          === supplied.file_identity_sha256
+        && ['active', 'idle'].includes(session.status)
+        && Date.parse(session.lease_until) > now
+    ))
+    .sort((left, right) => (
+      left.source_task_id.localeCompare(right.source_task_id)
+    ));
+  assertControl(
+    sessions.every((session) => (
+      sessions.length === 0
+        || (
+          session.role === sessions[0].role
+            && session.thread_id === sessions[0].thread_id
+            && session.host_id === sessions[0].host_id
+            && session.attempt === sessions[0].attempt
+            && (
+              session.role_identity
+                ? session.role_identity.session_id
+                : null
+            ) === (
+              sessions[0].role_identity
+                ? sessions[0].role_identity.session_id
+                : null
+            )
+        )
+    )),
+    'CORRUPT_STORE',
+    'probe observation challenge issuer capability identity 分叉',
+  );
+  const issuerSession = sessions.find(
+    (session) => session.source_task_id === options.taskId,
+  ) || sessions[0] || null;
+  const bootstrapIssuer = !loaded.meta.bootstrap_consumed_at
+    && supplied.file === loaded.meta.bootstrap_capability_file
+    && hashesEqual(
+      supplied.sha256,
+      loaded.meta.bootstrap_capability_sha256,
+    );
+  const recoveryIssuer =
+    supplied.file === loaded.meta.foreman_recovery_capability_file
+    && hashesEqual(
+      supplied.sha256,
+      loaded.meta.foreman_recovery_capability_sha256,
+    );
+  const currentTarget = state.sessions[options.role] || null;
+  if (
+    currentTarget
+      && issuerSession
+      && issuerSession.role === options.role
+  ) {
+    assertControl(
+      issuerSession.role === options.role
+        && issuerSession.thread_id === currentTarget.thread_id
+        && issuerSession.host_id === currentTarget.host_id
+        && issuerSession.attempt === currentTarget.attempt,
+      'CAPABILITY_INVALID',
+      'current role canary refresh 必须由 exact current session 签发',
+    );
+    return {
+      kind: 'CURRENT_SESSION',
+      capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
+      session: issuerSession,
+    };
+  }
+  if (options.role === 'FOREMAN' && bootstrapIssuer) {
+    assertControl(
+      Object.values(loaded.snapshot.tasks || {})
+        .every((task) => !task.sessions.FOREMAN),
+      'CAPABILITY_CONSUMED',
+      'bootstrap 只能签发首次 FOREMAN identity intent',
+    );
+    return {
+      kind: 'BOOTSTRAP',
+      capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
+      session: null,
+    };
+  }
+  if (options.role === 'FOREMAN' && recoveryIssuer) {
+    const lineage = canonicalForemanRecoveryLineage(
+      loaded,
+      options.taskId,
+    );
+    assertControl(
+      lineage.sourceBindings.every((binding) => {
+        const sourceState =
+          loaded.snapshot.tasks[binding.task_id];
+        const sourceForeman = sourceState.sessions.FOREMAN;
+        return (
+          sourceState.recovery
+            && sourceState.recovery.role === 'FOREMAN'
+        ) || (
+          foremanRootRecoveryStatusEligible(
+            sourceState,
+            sourceForeman,
+          )
+            && Date.parse(sourceForeman.lease_until) <= now
+        );
+      }),
+      'CAPABILITY_INVALID',
+      'Goal recovery identity 必须绑定完整 eligible/expired predecessor scope',
+    );
+    assertControl(
+      (
+        currentTarget
+          && (
+            (
+              state.recovery
+                && state.recovery.role === 'FOREMAN'
+            )
+              || (
+                foremanRootRecoveryStatusEligible(state, currentTarget)
+                  && Date.parse(currentTarget.lease_until) <= now
+              )
+          )
+      ) || lineage.archivedAdoption,
+      'CAPABILITY_INVALID',
+      'Goal recovery authority 只签发已进入 recovery 或 lease-expired root recovery 的 FOREMAN successor',
+    );
+    return {
+      kind: 'GOAL_RECOVERY',
+      capability_sha256: supplied.sha256,
+      capability_file_identity_sha256:
+        supplied.file_identity_sha256,
+      session: lineage.predecessorSession,
+      predecessor_attempt: lineage.predecessorAttempt,
+      successor_attempt: lineage.successorAttempt,
+      recovery_scope_sha256: lineage.scope.scope_sha256,
+    };
+  }
+  const requiredRole = ['FOREMAN', 'CAPTAIN'].includes(options.role)
+    ? 'FOREMAN'
+    : 'CAPTAIN';
+  assertControl(
+    issuerSession && issuerSession.role === requiredRole,
+    'CAPABILITY_INVALID',
+    `role identity intent issuer 必须是 ${requiredRole}`,
+  );
+  if (options.role !== 'FOREMAN') {
+    assertControl(
+      issuerSession.source_task_id === options.taskId,
+      'CAPABILITY_INVALID',
+      'role identity intent issuer 不属于目标 task',
+    );
+  }
+  return {
+    kind: 'SESSION',
+    capability_sha256: supplied.sha256,
+    capability_file_identity_sha256:
+      supplied.file_identity_sha256,
+    session: issuerSession,
+  };
+}
+
+function sanitizedChallengeIssuerAuthority(loaded, state, authority) {
+  const session = authority.session
+    || (
+      authority.kind === 'GOAL_RECOVERY'
+        ? state.sessions.FOREMAN || null
+        : null
+    );
+  const sessionIdentity = session && session.role_identity
+    ? session.role_identity.session_id
+    : null;
+  const sourceTaskId = session
+    ? session.source_task_id || state.task_id
+    : null;
+  const sourceState = sourceTaskId
+    ? loaded.snapshot.tasks[sourceTaskId] || null
+    : null;
+  return {
+    kind: authority.kind,
+    capability_sha256: authority.capability_sha256,
+    capability_file_identity_sha256:
+      authority.capability_file_identity_sha256,
+    ...(authority.kind === 'GOAL_RECOVERY'
+      ? {
+        source_capability_sha256: session.capability_sha256,
+        source_capability_file_identity_sha256:
+          session.capability_file_identity_sha256,
+      }
+      : {}),
+    source_task_id: sourceTaskId,
+    source_state_revision: sourceState
+      ? sourceState.state_revision
+      : null,
+    source_event_head_sha256: sourceTaskId
+      ? loaded.lastEventHashes[sourceTaskId] || null
+      : null,
+    role: session ? session.role : null,
+    thread_id: session ? session.thread_id : null,
+    host_id: session ? session.host_id : null,
+    attempt: session ? session.attempt : null,
+    session_id: sessionIdentity,
+    lease_until: session ? session.lease_until : null,
+    registration_event_id:
+      session && session.registration_event_id
+        ? session.registration_event_id
+        : null,
+    bootstrap_init_receipt_sha256:
+      authority.kind === 'BOOTSTRAP'
+        ? loaded.meta.init_receipt_sha256
+        : null,
+    recovery_scope_sha256:
+      authority.kind === 'GOAL_RECOVERY'
+        ? authority.recovery_scope_sha256
+        : null,
+  };
+}
+
+function assertIssuerPrefixChronology(
+  root,
+  manifest,
+  authority,
+  transactionStartedAt,
+) {
+  if (authority.kind === 'BOOTSTRAP') return;
+  const transactionAt = Date.parse(transactionStartedAt);
+  const events = acceptedEventFiles(
+    root,
+    manifest.goal_id,
+    authority.source_task_id,
+  ).map((file) => readJson(
+    file,
+    `role identity issuer prefix ${path.basename(file)}`,
+  ));
+  const prefix = events.slice(0, authority.source_state_revision);
+  const head = prefix[prefix.length - 1] || null;
+  assertControl(
+    Number.isFinite(transactionAt)
+      && Number.isSafeInteger(authority.source_state_revision)
+      && authority.source_state_revision > 0
+      && prefix.length === authority.source_state_revision
+      && head
+      && head.event_sha256 === authority.source_event_head_sha256
+      && Number.isFinite(Date.parse(head.accepted_at))
+      && Date.parse(head.accepted_at) <= transactionAt,
+    'ROLE_IDENTITY_ISSUER_CHRONOLOGY_INVALID',
+    'role identity issuer accepted-event prefix 晚于 controller transaction boundary',
+  );
+}
+
+function prepareChallengeIdentity(root, options, transactionStartedAt) {
+  const loaded = loadGoalStateUnlocked(root, options.goalId, {
+    repairHeads: false,
+    repairBootstrapConsumption: false,
+  });
+  assertControl(
+    probeObservationProtocolRequired(loaded.manifest),
+    'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
+    'manifest 未启用 probe observation receipts',
+  );
+  assertControl(
+    loaded.meta.role_identity_protocol_version === 2,
+    'ROLE_IDENTITY_PROTOCOL_MIGRATION_REQUIRED',
+    'role identity intent producer 只接受 fresh v2 init；旧 Goal 必须先完成 audited migration',
+  );
+  const state = loaded.snapshot.tasks[options.taskId];
+  assertControl(state, 'UNKNOWN_TASK', `未知 task ${options.taskId}`);
+  const operationId = safeId(options.eventId, 'registration event_id');
+  assertControl(
+    operationId.length <= 181,
+    'CANARY_OBSERVATION_STABLE_ID_INVALID',
+    'role identity operation id 过长，无法形成 bounded derived stable ID',
+  );
+  const role = options.role;
+  assertControl(
+    ['FOREMAN', 'CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT'].includes(role),
+    'INVALID_ROLE',
+    `未知 role ${role}`,
+  );
+  const trustedInputs = options.trustedInputs;
+  assertControl(
+    trustedInputs
+      && trustedInputs.issuer
+      && trustedInputs.identity,
+    'ROLE_IDENTITY_INPUT_AUTHORITY_INVALID',
+    'role identity producer 缺 descriptor-bound trusted input capture',
+  );
+  const trustedIssuer = trustedInputs.issuer;
+  const issuer = {
+    file: path.resolve(options.issuerCapabilityFile),
+    sha256: sha256(trustedIssuer.bytes.toString('utf8').trim()),
+  };
+  assertControl(
+    /^[A-Za-z0-9_-]{40,128}$/.test(
+      trustedIssuer.bytes.toString('utf8').trim(),
+    ),
+    'CAPABILITY_INVALID',
+    'role identity issuer capability bytes 非法',
+  );
+  issuer.file_identity_sha256 =
+    trustedIssuer.file_identity_sha256;
+  const authority = challengeIssuerAuthority(loaded, options, issuer);
+  let attempt = controllerDerivedRoleAttempt(
+    loaded,
+    options.taskId,
+    role,
+  );
+  if (authority.kind === 'BOOTSTRAP') {
+    attempt = 1;
+  } else if (
+    authority.kind === 'CURRENT_SESSION'
+      || (role === 'FOREMAN' && authority.kind === 'SESSION')
+  ) {
+    attempt = authority.session.attempt;
+  } else if (authority.kind === 'GOAL_RECOVERY') {
+    assertControl(
+      Number.isSafeInteger(authority.predecessor_attempt)
+        && Number.isSafeInteger(authority.successor_attempt)
+        && authority.successor_attempt
+          === authority.predecessor_attempt + 1,
+      'GOAL_FOREMAN_LINEAGE_DIVERGED',
+      'Goal recovery identity predecessor/successor attempt 非法',
+    );
+    attempt = authority.successor_attempt;
+  }
+  const validatedObservation = validateRoleIdentityObservation({
+    receiptFile: options.identityReceipt,
+    receiptSha256: options.identityReceiptSha256,
+    operationId,
+    goalId: options.goalId,
+    taskId: options.taskId,
+    role,
+    repositoryHead: state.full_head,
+    acceptanceTime: transactionStartedAt,
+    maxTtlMs:
+      loaded.manifest.probe_observation_receipts.max_ttl_ms,
+    hostAttestation:
+      loaded.manifest.probe_observation_receipts.host_attestation,
+    trustedFile: trustedInputs.identity,
+  });
+  const observation = validatedObservation.record;
+  if (authority.kind === 'GOAL_RECOVERY') {
+    const predecessorIdentity = authority.session
+      && authority.session.role_identity;
+    assertControl(
+      authority.session
+        && predecessorIdentity
+        && observation.thread_id !== authority.session.thread_id
+        && observation.host_id !== authority.session.host_id
+        && observation.session_id !== predecessorIdentity.session_id,
+      'ROLE_IDENTITY_OBSERVATION_BINDING_MISMATCH',
+      'Goal recovery successor 必须绑定 fresh thread/host/session identity',
+    );
+  }
+  if (authority.kind === 'CURRENT_SESSION') {
+    const currentRoleIdentity = authority.session.role_identity;
+    const currentWorkerBootstrap =
+      authority.session.worker_bootstrap || null;
+    assertControl(
+      observation.thread_id === authority.session.thread_id
+        && observation.host_id === authority.session.host_id
+        && attempt === authority.session.attempt
+        && currentRoleIdentity
+        && observation.session_id === currentRoleIdentity.session_id
+        && observation.launch_id === authority.session.launch_id
+        && observation.worker_bootstrap_binding_sha256
+          === (
+            currentWorkerBootstrap
+              ? currentWorkerBootstrap.binding_sha256
+              : null
+          ),
+      'ROLE_IDENTITY_OBSERVATION_BINDING_MISMATCH',
+      'current session refresh observation identity/session/launch/bootstrap 不匹配',
+    );
+  }
+  if (role === 'FOREMAN' && authority.kind === 'SESSION') {
+    assertControl(
+      observation.thread_id === authority.session.thread_id
+        && observation.host_id === authority.session.host_id
+        && attempt === authority.session.attempt
+        && authority.session.role_identity
+        && observation.session_id
+          === authority.session.role_identity.session_id
+        && observation.launch_id === null
+        && observation.worker_bootstrap_binding_sha256 === null,
+      'GOAL_FOREMAN_PROJECTION_REQUIRED',
+      'later-task FOREMAN intent 必须复用 exact Goal authority identity',
+    );
+  }
+  if (!state.sessions[role]) {
+    if (!(role === 'FOREMAN' && authority.kind === 'SESSION')) {
+      assertFreshGoalRoleIdentity(
+        loaded.snapshot,
+        options.taskId,
+        role,
+        observation.thread_id,
+      );
+    }
+  } else if (authority.kind !== 'CURRENT_SESSION') {
+    assertControl(
+      (state.recovery && state.recovery.role === role)
+        || state.sessions[role].status === 'terminal'
+        || authority.kind === 'GOAL_RECOVERY',
+      'ROLE_REPLACEMENT_REQUIRES_RECOVERY',
+      `${role} successor identity intent 需要 durable recovery 或 terminal predecessor`,
+    );
+  }
+  if (['DEV', 'REVIEW', 'RECEIPT'].includes(role)) {
+    if (authority.kind !== 'CURRENT_SESSION') {
+      assertControl(
+        workerRoleIdentityRegistrationEligible(state, role),
+        'PREMATURE_ROLE_REGISTRATION',
+        `${role} identity producer 不能在当前 phase 提前发布`,
+      );
+    }
+    assertControl(
+      observation.launch_id,
+      'LAUNCH_ID_REQUIRED',
+      `${role} identity observation 必须绑定 upstream launch_id`,
+    );
+  } else {
+    assertControl(
+      observation.launch_id === null
+        && observation.worker_bootstrap_binding_sha256 === null,
+      'ROLE_IDENTITY_OBSERVATION_BINDING_MISMATCH',
+      `${role} control identity observation 禁止 worker launch/bootstrap binding`,
+    );
+  }
+  if (registrationRequiresWorkerBootstrap(loaded.manifest, role)) {
+    assertControl(
+      observation.worker_bootstrap_binding_sha256,
+      'WORKER_BOOTSTRAP_REGISTRATION_REQUIRED',
+      `${role} identity observation 缺 worker bootstrap binding`,
+    );
+  }
+  const workerBootstrap = ['DEV', 'REVIEW', 'RECEIPT'].includes(role)
+    ? registrationWorkerBootstrapBinding(
+      loaded,
+      state,
+      {
+        taskId: options.taskId,
+        role,
+        threadId: observation.thread_id,
+        hostId: observation.host_id,
+        repositoryWorktree: options.repositoryWorktree,
+        invocationCwd: options.workerWorktree,
+        workerBootstrapReceipt: options.workerBootstrapReceipt,
+        workerBootstrapReceiptSha256:
+          options.workerBootstrapReceiptSha256,
+        workerBootstrapOperationId:
+          options.workerBootstrapOperationId,
+        workerBootstrapChallenge:
+          options.workerBootstrapChallenge,
+        workerBootstrapIdentityPlanSha256:
+          options.workerBootstrapIdentityPlanSha256,
+        workerBootstrapReceiptCapture:
+          trustedInputs.worker_bootstrap_receipt || null,
+        workerBootstrapIntentCapture:
+          trustedInputs.worker_bootstrap_intent || null,
+      },
+    )
+    : null;
+  assertControl(
+    workerBootstrap === null
+      || (
+        workerBootstrap.thread === observation.thread_id
+          && workerBootstrap.host === observation.host_id
+          && workerBootstrap.head === state.full_head
+          && workerBootstrap.operation_id
+            === observation.launch_id
+          && workerBootstrap.binding_sha256
+            === observation.worker_bootstrap_binding_sha256
+      ),
+    'ROLE_IDENTITY_WORKER_AUTHORITY_MISMATCH',
+    'worker identity 必须在 producer transaction 绑定 exact controller bootstrap authority',
+  );
+  const issuerAuthority = sanitizedChallengeIssuerAuthority(
+    loaded,
+    state,
+    authority,
+  );
+  assertIssuerPrefixChronology(
+    root,
+    loaded.manifest,
+    issuerAuthority,
+    transactionStartedAt,
+  );
+  const semanticSlot = {
+    schema_version: 1,
+    kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
+    goal_id: options.goalId,
+    task_id: options.taskId,
+    role,
+    attempt,
+    state_revision: state.state_revision,
+    control_epoch: loaded.control.epoch,
+    packet: {
+      revision: state.packet.revision,
+      sha256: state.packet.sha256,
+    },
+    base_head: state.base_head,
+    full_head: state.full_head,
+    task_cycle: state.task_cycle,
+  };
+  const identityInventory = roleIdentityInventory(loaded.paths);
+  const existingOperation = identityInventory.find(
+    (entry) => entry.operation_id === operationId,
+  ) || null;
+  const renewalCandidates = identityInventory
+    .filter((entry) => (
+      entry.operation_id !== operationId
+        && entry.intent.goal_id === options.goalId
+        && entry.intent.task_id === options.taskId
+        && entry.intent.role === role
+        && entry.intent.attempt === attempt
+        && entry.intent.state_revision === state.state_revision
+        && entry.intent.control_epoch === loaded.control.epoch
+        && entry.intent.packet.revision === state.packet.revision
+        && entry.intent.packet.sha256 === state.packet.sha256
+        && entry.intent.base_head === state.base_head
+        && entry.intent.full_head === state.full_head
+        && entry.intent.task_cycle === state.task_cycle
+        && Date.parse(entry.intent.identity_observation.expires_at)
+          <= Date.parse(transactionStartedAt)
+        && goalEventIdOccurrences(
+          loaded,
+          entry.operation_id,
+        ).length === 0
+        && goalControlEventOccurrences(
+          loaded,
+          entry.operation_id,
+        ).length === 0
+    ));
+  const renewalTip = renewalCandidates
+    .sort((left, right) => (
+      Number(right.intent.renewal_index || 0)
+        - Number(left.intent.renewal_index || 0)
+    ))[0] || null;
+  if (renewalTip && !existingOperation) {
+    const tipIndex = Number(renewalTip.intent.renewal_index || 0);
+    assertControl(
+      renewalCandidates.filter((candidate) => (
+        Number(candidate.intent.renewal_index || 0) === tipIndex
+      )).length === 1
+        && identityInventory.every((candidate) => (
+          candidate.intent.predecessor_intent_sha256
+            !== renewalTip.intent.intent_sha256
+        )),
+      'ROLE_IDENTITY_BUNDLE_INVALID',
+      'expired role identity renewal lineage 已分叉或 tip 非唯一',
+    );
+  }
+  const renewalBinding = existingOperation
+    && existingOperation.intent.predecessor_intent_sha256 !== undefined
+    ? {
+      predecessor_intent_sha256:
+        existingOperation.intent.predecessor_intent_sha256,
+      renewal_index: existingOperation.intent.renewal_index,
+    }
+    : renewalTip
+      ? {
+      predecessor_intent_sha256:
+        renewalTip.intent.intent_sha256,
+      renewal_index:
+        Number(renewalTip.intent.renewal_index || 0) + 1,
+      }
+      : null;
+  const semanticSlotSha256 = hashObject(
+    renewalBinding
+      ? { ...semanticSlot, ...renewalBinding }
+      : semanticSlot,
+  );
+  const intentUnsigned = {
+    schema_version: 1,
+    kind: 'ROLE_IDENTITY_INTENT',
+    protocol: 'goalctl-role-identity-intent-v2',
+    operation_id: operationId,
+    semantic_slot_sha256: semanticSlotSha256,
+    ...(renewalBinding || {}),
+    goal_id: options.goalId,
+    task_id: options.taskId,
+    role,
+    thread_id: observation.thread_id,
+    host_id: observation.host_id,
+    attempt,
+    session_id: observation.session_id,
+    launch_id: observation.launch_id,
+    state_revision: state.state_revision,
+    control_epoch: loaded.control.epoch,
+    packet: {
+      revision: state.packet.revision,
+      sha256: state.packet.sha256,
+    },
+    base_head: state.base_head,
+    full_head: state.full_head,
+    task_cycle: state.task_cycle,
+    worker_bootstrap: workerBootstrap,
+    worker_bootstrap_authority: workerBootstrap
+      ? {
+        receipt_content_sha256:
+          options.trustedInputs.worker_bootstrap_receipt.sha256,
+        receipt_file_identity_sha256:
+          options.trustedInputs.worker_bootstrap_receipt
+            .file_identity_sha256,
+        intent_content_sha256:
+          options.trustedInputs.worker_bootstrap_intent.sha256,
+        intent_file_identity_sha256:
+          options.trustedInputs.worker_bootstrap_intent
+            .file_identity_sha256,
+      }
+      : null,
+    identity_observation: {
+      receipt_sha256: normalizeHash(
+        options.identityReceiptSha256,
+        'role identity observation receipt sha256',
+      ),
+      receipt_file_identity_sha256:
+        validatedObservation.receipt_file_identity_sha256,
+      record_sha256: observation.record_sha256,
+      attestation_key_id: observation.attestation.key_id,
+      observed_at: observation.observed_at,
+      expires_at: observation.expires_at,
+      worker_bootstrap_binding_sha256:
+        observation.worker_bootstrap_binding_sha256,
+      signed_record: observation,
+    },
+    issuer_authority: {
+      ...issuerAuthority,
+    },
+    created_at: transactionStartedAt,
+  };
+  return {
+    loaded,
+    state,
+    observation,
+    authority,
+    workerBootstrap,
+    intent: validateRoleIdentityIntent({
+      ...intentUnsigned,
+      intent_sha256: hashObject(intentUnsigned),
+    }),
+  };
+}
+
+function captureRoleIdentityInput(
+  file,
+  label,
+  maxBytes,
+  options = {},
+) {
+  try {
+    return readStableFile(path.resolve(file), {
+      label,
+      parentMode: 0o700,
+      mode: 0o600,
+      maxBytes,
+      ...(options.stableInodeIdentity === true
+        ? { stableInodeIdentity: true }
+        : {}),
+    });
+  } catch (error) {
+    throw new ControlError(
+      'ROLE_IDENTITY_INPUT_AUTHORITY_INVALID',
+      `${label} file authority 非法 (${error.code || 'UNKNOWN'})`,
+    );
+  }
+}
+
+function captureChallengeTrustedInputs(root, options) {
+  const identity = captureRoleIdentityInput(
+    options.identityReceipt,
+    'role identity observation receipt',
+    64 * 1024,
+  );
+  let observation;
+  try {
+    observation = JSON.parse(identity.bytes.toString('utf8'));
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_OBSERVATION_INVALID',
+      'role identity observation receipt 不是合法 JSON',
+    );
+  }
+  const issuer = captureRoleIdentityInput(
+    options.issuerCapabilityFile,
+    'role identity issuer capability',
+    256,
+    { stableInodeIdentity: true },
+  );
+  const trusted = {
+    issuer,
+    identity,
+    worker_bootstrap_receipt: null,
+    worker_bootstrap_intent: null,
+  };
+  if (['DEV', 'REVIEW', 'RECEIPT'].includes(options.role)) {
+    assertControl(
+      typeof options.workerBootstrapReceipt === 'string'
+        && typeof observation.launch_id === 'string',
+      'WORKER_BOOTSTRAP_REGISTRATION_REQUIRED',
+      'worker identity producer 缺 bootstrap authority',
+    );
+    trusted.worker_bootstrap_receipt = captureRoleIdentityInput(
+      options.workerBootstrapReceipt,
+      'worker bootstrap receipt',
+      512 * 1024,
+    );
+    trusted.worker_bootstrap_intent = captureRoleIdentityInput(
+      path.join(
+        path.dirname(path.resolve(options.workerBootstrapReceipt)),
+        'intent.json',
+      ),
+      'worker bootstrap intent',
+      512 * 1024,
+    );
+  }
+  return trusted;
+}
+
 function prepareProbeObservationChallenge(cwd, options) {
   const root = controlRoot(cwd);
+  let preparedIdentity = null;
+  let trustedInputs = null;
+  let oddRecoveryAuthorized = false;
+  let pristineOddRecoveryAuthorized = false;
+  let readOnlyExactRetry = null;
+  const challengeRequest = () => {
+    const {
+      loaded,
+      observation,
+      authority,
+      intent,
+    } = preparedIdentity;
+    const eventId = safeId(
+      options.eventId,
+      'registration event_id',
+    );
+    const planSha256 = normalizeHash(
+      options.planSha256,
+      'canary plan sha256',
+    );
+    const hostAttestation =
+      loaded.manifest.probe_observation_receipts.host_attestation;
+    return {
+      schema_version: 1,
+      kind: 'PROBE_OBSERVATION_CHALLENGE',
+      goal_id: options.goalId,
+      task_id: options.taskId,
+      role: options.role,
+      thread_id: observation.thread_id,
+      host_id: observation.host_id,
+      attempt: intent.attempt,
+      registration_event_id: eventId,
+      canary_plan_sha256: planSha256,
+      producer_namespace:
+        process.env.GOAL_CONTROL_TEST_MODE === '1'
+            ? 'ISOLATED_TEST_FAKE'
+            : 'HOST_ADAPTER',
+      issuer_capability_sha256: authority.capability_sha256,
+      attestation_algorithm: hostAttestation.algorithm,
+      attestation_key_id: hostAttestation.key_id,
+      attestation_public_key_sha256:
+        hostAttestation.public_key_sha256,
+    };
+  };
   return withLock(root, () => {
-    const loaded = loadGoalStateUnlocked(root, options.goalId);
-    assertControl(
-      probeObservationProtocolRequired(loaded.manifest),
-      'PROBE_OBSERVATION_PROTOCOL_UNSUPPORTED',
-      'manifest 未启用 probe observation receipts',
-    );
-    assertControl(
-      loaded.snapshot.tasks[options.taskId],
-      'UNKNOWN_TASK',
-      `未知 task ${options.taskId}`,
-    );
+    const {
+      loaded,
+      observation,
+      authority,
+      intent,
+    } = preparedIdentity;
     const eventId = safeId(
       options.eventId,
       'registration event_id',
@@ -747,83 +2251,33 @@ function prepareProbeObservationChallenge(cwd, options) {
       'INVALID_ROLE',
       `未知 role ${role}`,
     );
-    const hostId = options.hostId || 'local';
-    const attempt = Number(options.attempt || 1);
-    assertControl(
-      Number.isSafeInteger(attempt) && attempt > 0,
-      'INVALID_REGISTRATION',
-      'attempt 必须是正整数',
-    );
-    const planSha256 = normalizeHash(
-      options.planSha256,
-      'canary plan sha256',
-    );
-    const issuer = readCapabilityFile(options.issuerCapabilityFile);
-    const now = runtimeNowMilliseconds();
-    const liveSessionIssuer = Object.values(
-      loaded.snapshot.tasks,
-    ).flatMap((task) => Object.values(task.sessions || {}))
-      .some((session) => (
-        session.capability_sha256 === issuer.sha256
-          && session.capability_file === issuer.file
-          && ['active', 'idle'].includes(session.status)
-          && Date.parse(session.lease_until) > now
-      ));
-    const bootstrapIssuer = !loaded.meta.bootstrap_consumed_at
-      && issuer.file === loaded.meta.bootstrap_capability_file
-      && hashesEqual(
-        issuer.sha256,
-        loaded.meta.bootstrap_capability_sha256,
-      );
-    const recoveryIssuer =
-      issuer.file === loaded.meta.foreman_recovery_capability_file
-      && hashesEqual(
-        issuer.sha256,
-        loaded.meta.foreman_recovery_capability_sha256,
-      );
-    assertControl(
-      bootstrapIssuer || recoveryIssuer || liveSessionIssuer,
-      'CAPABILITY_INVALID',
-      'probe observation challenge issuer capability 无权签发',
-    );
     if (!fs.existsSync(loaded.paths.probeObservationChallenges)) {
-      fs.mkdirSync(loaded.paths.probeObservationChallenges, {
-        mode: 0o700,
-      });
+      ensureDir(loaded.paths.probeObservationChallenges);
     }
     ensurePrivateDirectory(loaded.paths.probeObservationChallenges, {
       repair: true,
     });
-    const file = probeObservationChallengeFile(loaded.paths, eventId);
-    const hostAttestation =
-      loaded.manifest.probe_observation_receipts.host_attestation;
-    const request = {
-      schema_version: 1,
-      kind: 'PROBE_OBSERVATION_CHALLENGE',
-      goal_id: options.goalId,
-      task_id: options.taskId,
-      role,
-      thread_id: options.threadId,
-      host_id: hostId,
-      attempt,
-      registration_event_id: eventId,
-      canary_plan_sha256: planSha256,
-      producer_namespace:
-        process.env.GOAL_CONTROL_TEST_MODE === '1'
-            ? 'ISOLATED_TEST_FAKE'
-            : 'HOST_ADAPTER',
-      issuer_capability_sha256: issuer.sha256,
-      attestation_algorithm: hostAttestation.algorithm,
-      attestation_key_id: hostAttestation.key_id,
-      attestation_public_key_sha256:
-        hostAttestation.public_key_sha256,
-    };
-    if (fs.existsSync(file)) {
-      const existing = readJson(file, 'probe observation challenge');
-      const unsigned = { ...existing };
-      delete unsigned.record_sha256;
+    ensurePrivateDirectory(loaded.paths.roleIdentityIntents, {
+      repair: true,
+    });
+    const bundleFile = roleIdentityBundleFile(
+      loaded.paths,
+      intent.semantic_slot_sha256,
+    );
+    const request = challengeRequest();
+    if (fs.existsSync(bundleFile)) {
+      const existingBundle = validateRoleIdentityBundle(
+        readPrivateRoleIdentityJson(
+          bundleFile,
+          'role identity atomic bundle',
+        ),
+      );
+      const existing = existingBundle.challenge;
+      const existingIntent = existingBundle.intent;
       assertControl(
-        existing.record_sha256 === hashObject(unsigned)
+        existingIntent
+          && existingIntent.intent_sha256 === intent.intent_sha256
+          && existingBundle.operation_id === eventId
           && Object.entries(request).every(
             ([key, value]) => existing[key] === value,
           ),
@@ -848,7 +2302,19 @@ function prepareProbeObservationChallenge(cwd, options) {
       ...unsigned,
       record_sha256: hashObject(unsigned),
     };
-    atomicWriteJson(file, record);
+    const bundleUnsigned = {
+      schema_version: 2,
+      kind: 'ROLE_IDENTITY_CHALLENGE_BUNDLE',
+      operation_id: eventId,
+      semantic_slot_sha256: intent.semantic_slot_sha256,
+      intent,
+      challenge: record,
+    };
+    const bundle = validateRoleIdentityBundle({
+      ...bundleUnsigned,
+      bundle_sha256: hashObject(bundleUnsigned),
+    });
+    atomicWriteJson(bundleFile, bundle);
     return publicProbeObservationChallenge(record);
   }, {
     transactionKey: () => {
@@ -856,15 +2322,13 @@ function prepareProbeObservationChallenge(cwd, options) {
         options.eventId,
         'registration event_id',
       );
+      trustedInputs = captureChallengeTrustedInputs(root, options);
       const request = {
         schema_version: 1,
         kind: 'PROBE_OBSERVATION_CHALLENGE',
         goal_id: safeId(options.goalId, 'goal_id'),
         task_id: safeId(options.taskId, 'task_id'),
         role: options.role,
-        thread_id: safeId(options.threadId, 'thread_id'),
-        host_id: safeId(options.hostId || 'local', 'host_id'),
-        attempt: Number(options.attempt || 1),
         registration_event_id: eventId,
         canary_plan_sha256: normalizeHash(
           options.planSha256,
@@ -877,6 +2341,40 @@ function prepareProbeObservationChallenge(cwd, options) {
         issuer_capability_file: path.resolve(
           options.issuerCapabilityFile,
         ),
+        identity_receipt_file: path.resolve(
+          options.identityReceipt,
+        ),
+        identity_receipt_sha256: normalizeHash(
+          options.identityReceiptSha256,
+          'role identity observation receipt sha256',
+        ),
+        worker_bootstrap_input: {
+          receipt_file: options.workerBootstrapReceipt == null
+            ? null
+            : path.resolve(options.workerBootstrapReceipt),
+          receipt_sha256: options.workerBootstrapReceiptSha256 || null,
+          operation_id: options.workerBootstrapOperationId || null,
+          challenge: options.workerBootstrapChallenge || null,
+          identity_plan_sha256:
+            options.workerBootstrapIdentityPlanSha256 || null,
+          worktree: options.workerWorktree == null
+            ? null
+            : path.resolve(options.workerWorktree),
+        },
+        trusted_input_file_identities: {
+          issuer: trustedInputs.issuer.file_identity_sha256,
+          identity: trustedInputs.identity.file_identity_sha256,
+          worker_bootstrap_receipt:
+            trustedInputs.worker_bootstrap_receipt
+              ? trustedInputs.worker_bootstrap_receipt
+                .file_identity_sha256
+              : null,
+          worker_bootstrap_intent:
+            trustedInputs.worker_bootstrap_intent
+              ? trustedInputs.worker_bootstrap_intent
+                .file_identity_sha256
+              : null,
+        },
       };
       return canonicalTransactionKey(
         'PROBE_OBSERVATION_CHALLENGE',
@@ -885,6 +2383,116 @@ function prepareProbeObservationChallenge(cwd, options) {
         hashObject(request),
       );
     },
+    sameStableOperationMismatchCode:
+      'CANARY_OBSERVATION_REPLAY_CONFLICT',
+    sameStableOperationMismatchMessage:
+      'probe challenge/role identity stable operation 已绑定不同 request',
+    beforeGeneration: (transaction) => {
+      oddRecoveryAuthorized = false;
+      pristineOddRecoveryAuthorized = false;
+      preparedIdentity = prepareChallengeIdentity(
+        root,
+        {
+          ...options,
+          repositoryWorktree: cwd,
+          trustedInputs,
+        },
+        transaction.transaction_started_at,
+      );
+      const paths = preparedIdentity.loaded.paths;
+      const operationId = preparedIdentity.intent.operation_id;
+      const slot = preparedIdentity.intent.semantic_slot_sha256;
+      const inventory = roleIdentityInventory(paths);
+      const slotMatches = inventory.filter((entry) => (
+        entry.semantic_slot_sha256 === slot
+      ));
+      const operationMatches = inventory.filter((entry) => (
+        entry.operation_id === operationId
+      ));
+      assertControl(
+        slotMatches.length <= 1 && operationMatches.length <= 1,
+        'ROLE_IDENTITY_BUNDLE_INVALID',
+        'role identity semantic slot/operation inventory 分叉',
+      );
+      if (slotMatches.length === 1 || operationMatches.length === 1) {
+        const existing = (
+          slotMatches[0] || operationMatches[0]
+        );
+        assertControl(
+          existing.semantic_slot_sha256 === slot
+            && existing.operation_id === operationId,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          '同一 role identity semantic slot 只允许 original operation exact retry',
+        );
+        const retryIntentUnsigned = {
+          ...preparedIdentity.intent,
+          created_at: existing.intent.created_at,
+        };
+        delete retryIntentUnsigned.intent_sha256;
+        preparedIdentity.intent = validateRoleIdentityIntent({
+          ...retryIntentUnsigned,
+          intent_sha256: hashObject(retryIntentUnsigned),
+        });
+        assertControl(
+          existing.intent.intent_sha256
+            === preparedIdentity.intent.intent_sha256,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'role identity exact retry authority/receipt/lineage 漂移',
+        );
+        assertControl(
+          existing.format === 'BUNDLE_V2',
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'legacy role identity slot 禁止由新 operation 或新 protocol 覆盖',
+        );
+        if (transaction.mode === 'FRESH') {
+          const request = challengeRequest();
+          assertControl(
+            Object.entries(request).every(
+              ([key, value]) => existing.bundle.challenge[key] === value,
+            ),
+            'CANARY_OBSERVATION_REPLAY_CONFLICT',
+            'challenge stable event 已绑定不同 request',
+          );
+          readOnlyExactRetry = publicProbeObservationChallenge(
+            existing.bundle.challenge,
+          );
+        }
+        oddRecoveryAuthorized = isOddTransactionRetry(
+          transaction.mode,
+        );
+      } else {
+        assertControl(
+          goalEventIdOccurrences(
+            preparedIdentity.loaded,
+            operationId,
+          ).length === 0
+            && goalControlEventOccurrences(
+              preparedIdentity.loaded,
+              operationId,
+            ).length === 0,
+          'CANARY_OBSERVATION_REPLAY_CONFLICT',
+          'role identity operation_id 已被 accepted event namespace 占用',
+        );
+        if (isOddTransactionRetry(transaction.mode)) {
+          pristineOddRecoveryAuthorized = true;
+        }
+      }
+    },
+    authorizeOddRecovery: () => oddRecoveryAuthorized,
+    authorizePristineOddRecovery: () =>
+      pristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyExactRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyExactRetry,
+        }
+    ),
+    afterGenerationBeforeCallback: generationBoundaryFaultHook(
+      cwd,
+      'GOAL_CONTROL_TEST_FAULT_AFTER_ROLE_IDENTITY_GENERATION',
+    ),
   });
 }
 
@@ -999,6 +2607,8 @@ function registrationWorkerBootstrapBinding(loaded, state, options) {
     taskId: options.taskId,
     role: options.role,
     canaryPolicy: loaded.manifest.worker_canary_bootstrap.policy,
+    receiptCapture: options.workerBootstrapReceiptCapture || null,
+    intentCapture: options.workerBootstrapIntentCapture || null,
   });
   assertControl(
     receipt.head === state.full_head,
@@ -1014,6 +2624,7 @@ function registrationProbeObservationBinding(
   state,
   options,
   eventId = registrationStableEventId(options),
+  bundleEntry = undefined,
 ) {
   const request = probeObservationOptions(options);
   const required = probeObservationProtocolRequired(loaded.manifest);
@@ -1028,13 +2639,25 @@ function registrationProbeObservationBinding(
     '当前 manifest 不接受 probe observation registration binding',
   );
   if (request === null) return null;
-  const challengeRecord = probeObservationChallengeRecord(
-    loaded.paths,
-    {
-      ...options,
-      registrationEventId: eventId,
-    },
-    request.canary_plan_sha256,
+  const challengeRecord = bundleEntry
+    ? bundleEntry.bundle.challenge
+    : probeObservationChallengeRecord(
+      loaded.paths,
+      {
+        ...options,
+        registrationEventId: eventId,
+      },
+      request.canary_plan_sha256,
+    );
+  assertControl(
+    !bundleEntry
+      || (
+        bundleEntry.bundle.operation_id === eventId
+          && challengeRecord.canary_plan_sha256
+            === request.canary_plan_sha256
+      ),
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'registration probe observation 未绑定 captured atomic bundle',
   );
   return validateProbeObservationReceipt({
     ...options,
@@ -1060,7 +2683,7 @@ function registrationProbeObservationBinding(
   });
 }
 
-function registrationTransactionKey(options) {
+function registrationTransactionKey(options, bundleEntry = null) {
   const goalId = safeId(options.goalId, 'goal_id');
   const taskId = safeId(options.taskId, 'task_id');
   const eventId = registrationStableEventId(options);
@@ -1078,6 +2701,12 @@ function registrationTransactionKey(options) {
     status: options.status || 'active',
     launch_id: options.launchId || null,
     authorizer_thread_id: options.authorizerThreadId || null,
+    role_identity_bundle: bundleEntry
+      ? {
+        bundle_sha256: bundleEntry.bundle.bundle_sha256,
+        file_identity_sha256: bundleEntry.file_identity_sha256,
+      }
+      : null,
     ...(workerBootstrapOptions(options)
       ? { worker_bootstrap: workerBootstrapOptions(options) }
       : {}),
@@ -1093,7 +2722,80 @@ function registrationTransactionKey(options) {
   );
 }
 
-function foremanRecoveryTransactionKey(options) {
+function captureRegistrationRoleIdentityBundle(root, options) {
+  const paths = goalPaths(root, safeId(options.goalId, 'goal_id'));
+  const eventId = registrationStableEventId(options);
+  const entry = readRoleIdentityBundleEntryByOperation(paths, eventId);
+  if (entry) return entry;
+  return null;
+}
+
+function prevalidateFreshForemanRecoveryTransaction(
+  root,
+  options,
+  bundleEntry,
+) {
+  const goalId = safeId(options.goalId, 'goal_id');
+  const rootRecoveryId = safeId(
+    options.eventId,
+    'root recovery event_id',
+  );
+  const paths = goalPaths(root, goalId);
+  const batch = recoveryBatchState(paths, goalId, rootRecoveryId);
+  if (batch.intent || batch.commit) return;
+  if (!bundleEntry) return;
+  assertControl(
+    bundleEntry.bundle && bundleEntry.bundle.intent,
+    'ROLE_IDENTITY_INTENT_REQUIRED',
+    'Goal recovery 必须消费 exact upstream role identity bundle',
+  );
+  const intent = bundleEntry.bundle.intent;
+  assertControl(
+    intent.operation_id === rootRecoveryId
+      && intent.goal_id === goalId
+      && intent.task_id === options.taskId
+      && intent.role === 'FOREMAN'
+      && intent.thread_id === options.threadId
+      && intent.host_id === (options.hostId || 'local')
+      && intent.attempt === Number(options.attempt)
+      && intent.launch_id === null
+      && intent.issuer_authority.kind === 'GOAL_RECOVERY'
+      && intent.issuer_authority.recovery_scope_sha256
+        === normalizeHash(
+          options.expectedGoalScopeSha256,
+          'expected Goal FOREMAN recovery scope sha256',
+        ),
+    'ROLE_IDENTITY_INTENT_MISMATCH',
+    'Goal recovery request 与 exact upstream identity bundle 不匹配',
+  );
+  const loaded = loadGoalStateUnlocked(root, goalId, {
+    repairHeads: false,
+    repairBootstrapConsumption: false,
+  });
+  exactUnsealedForemanRecoveryPreparedRequest(
+    loaded,
+    options,
+    rootRecoveryId,
+  );
+}
+
+function assertRegistrationBundleCaptureCurrent(paths, capture) {
+  if (!capture) return;
+  const current = readPrivateRoleIdentityJson(
+    capture.file,
+    'registration captured role identity bundle',
+    true,
+  );
+  assertControl(
+    current.file_identity_sha256 === capture.file_identity_sha256
+      && validateRoleIdentityBundle(current.value).bundle_sha256
+        === capture.bundle.bundle_sha256,
+    'ROLE_IDENTITY_BUNDLE_INVALID',
+    'registration captured role identity bundle file object/bytes 漂移',
+  );
+}
+
+function foremanRecoveryTransactionKey(options, bundleEntry = null) {
   const goalId = safeId(options.goalId, 'goal_id');
   const taskId = safeId(options.taskId, 'task_id');
   const eventId = safeId(options.eventId, 'root recovery event_id');
@@ -1137,6 +2839,12 @@ function foremanRecoveryTransactionKey(options) {
     ...(probeObservationOptions(options)
       ? { probe_observation: probeObservationOptions(options) }
       : {}),
+    role_identity_bundle: bundleEntry
+      ? {
+        bundle_sha256: bundleEntry.bundle.bundle_sha256,
+        file_identity_sha256: bundleEntry.file_identity_sha256,
+      }
+      : null,
   };
   return canonicalTransactionKey(
     'FOREMAN_RECOVERY',
@@ -1781,6 +3489,8 @@ function publicProjection(source) {
     if (!candidate || typeof candidate !== 'object') return;
     delete candidate.capability_file;
     delete candidate.capability_sha256;
+    delete candidate.capability_file_identity_sha256;
+    delete candidate.source_capability_file_identity_sha256;
     for (const nested of Object.values(candidate)) redact(nested);
   };
   redact(value);
@@ -2163,6 +3873,7 @@ function initializeGoal(cwd, manifestFile) {
         foreman_recovery_capability_sha256: foremanRecovery.sha256,
         init_receipt_schema_version: 1,
         init_receipt_sha256: receipt.receipt.receipt_sha256,
+        role_identity_protocol_version: 2,
       }));
       fsyncDirectory(temporaryGoalDir);
       maybeInjectRecoveryBatchFault(
@@ -2267,6 +3978,13 @@ function loadGoalFiles(root, goalId, options = {}) {
   assertControl(hashObject(unsignedManifest) === manifestHash, 'CORRUPT_STORE', 'control manifest hash 不匹配');
   const meta = readJson(paths.meta, 'goal metadata');
   assertControl(meta.goal_id === goalId && meta.schema_version === 1, 'CORRUPT_STORE', 'goal metadata 身份不匹配');
+  assertControl(
+    meta.role_identity_protocol_version === undefined
+      || meta.role_identity_protocol_version === 1
+      || meta.role_identity_protocol_version === 2,
+    'CORRUPT_STORE',
+    'goal metadata role identity protocol version 非法',
+  );
   const unsignedMeta = { ...meta };
   delete unsignedMeta.meta_sha256;
   assertControl(hashObject(unsignedMeta) === meta.meta_sha256, 'CORRUPT_STORE', 'goal metadata hash 不匹配');
@@ -2513,7 +4231,10 @@ function loadTaskEvents(root, goalId, taskId, options = {}) {
 }
 
 function rebuildTask(root, manifest, control, task, options = {}) {
-  let state = initialTaskState(task, manifest);
+  let state = initialTaskState(task, manifest, {
+    roleIdentityProtocolVersion:
+      options.roleIdentityProtocolVersion || 1,
+  });
   const eventIds = new Map();
   for (const event of loadTaskEvents(root, manifest.goal_id, task.id, options)) {
     assertControl(!eventIds.has(event.event_id), 'CORRUPT_STORE', `event id 重复: ${event.event_id}`);
@@ -2649,15 +4370,960 @@ function writeProjections(paths, manifest, snapshot) {
 }
 
 function rebuildAndWriteUnlocked(root, goalId) {
-  const { paths, manifest, control } = loadGoalFiles(root, goalId);
-  const { snapshot } = buildSnapshot(root, manifest, control);
+  const {
+    paths,
+    manifest,
+    meta,
+    control,
+  } = loadGoalFiles(root, goalId);
+  const { snapshot } = buildSnapshot(root, manifest, control, {
+    roleIdentityProtocolVersion:
+      meta.role_identity_protocol_version || 1,
+  });
+  assertRoleIdentityAuthorityReplay(
+    root,
+    paths,
+    snapshot,
+    meta,
+    manifest,
+    control,
+  );
   const ledger = writeProjections(paths, manifest, snapshot);
   return { ...snapshot, ledger };
 }
 
+function issuerLeaseWitnessAt(
+  root,
+  manifest,
+  authority,
+  createdAt,
+) {
+  const files = acceptedEventFiles(
+    root,
+    manifest.goal_id,
+    authority.source_task_id,
+  );
+  const allEvents = files.map((file) => readJson(
+    file,
+    `issuer lease witness ${path.basename(file)}`,
+  ));
+  const events = [];
+  let prefixClosed = false;
+  for (const event of allEvents) {
+    events.push(event);
+    if (
+      event.event_sha256 === authority.source_event_head_sha256
+    ) {
+      prefixClosed = true;
+      break;
+    }
+  }
+  assertControl(
+    prefixClosed
+      && events.length === authority.source_state_revision
+      && events[events.length - 1].event_sha256
+        === authority.source_event_head_sha256,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity issuer source accepted-event prefix 缺失或漂移',
+  );
+  const registration = events.find((event) => (
+    event.event_id === authority.registration_event_id
+      && ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN']
+        .includes(event.type)
+  ));
+  const registrationMatches = registration
+    && (
+      registration.type === 'REGISTER_ROLE'
+        ? (
+          registration.payload.role === authority.role
+            && registration.payload.thread_id === authority.thread_id
+            && registration.payload.host_id === authority.host_id
+            && registration.payload.attempt === authority.attempt
+        )
+        : (
+          authority.role === 'FOREMAN'
+            && registration.actor.thread_id === authority.thread_id
+            && registration.actor.host_id === authority.host_id
+            && registration.payload.attempt === authority.attempt
+        )
+    );
+  assertControl(
+    registration
+      && registrationMatches
+      && registration.payload.capability_sha256
+        === authority.capability_sha256
+      && registration.payload.capability_file_identity_sha256
+        === authority.capability_file_identity_sha256
+      && registration.payload.role_identity
+      && registration.payload.role_identity.session_id
+        === authority.session_id,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity issuer registration lease witness 缺失或漂移',
+  );
+  let leaseUntil = registration.payload.goal_foreman_projection === true
+    ? registration.payload.projected_lease_until
+    : new Date(
+      Date.parse(registration.accepted_at)
+        + Number(registration.payload.lease_ms),
+    ).toISOString();
+  let issuerStatus = registration.payload.status || 'active';
+  let issuerUsable = ['active', 'idle'].includes(issuerStatus);
+  const registrationIndex = events.indexOf(registration);
+  for (const event of events.slice(registrationIndex + 1)) {
+    if (
+      event.type === 'HEARTBEAT'
+        && event.actor.role === authority.role
+        && event.actor.thread_id === authority.thread_id
+        && event.actor.host_id === authority.host_id
+    ) {
+      issuerStatus = event.payload.status || 'active';
+      issuerUsable = ['active', 'idle'].includes(issuerStatus);
+      leaseUntil = new Date(
+        Date.parse(event.accepted_at)
+          + Number(event.payload.lease_ms || 3_600_000),
+      ).toISOString();
+      continue;
+    }
+    if (
+      event.type === 'ROLE_LOST'
+        && event.payload.role === authority.role
+        && (
+          event.payload.expected_thread_id === undefined
+            || (
+              event.payload.expected_thread_id === authority.thread_id
+                && event.payload.expected_host_id
+                  === authority.host_id
+                && event.payload.expected_attempt === authority.attempt
+            )
+        )
+    ) {
+      issuerUsable = false;
+      issuerStatus = 'lost';
+      continue;
+    }
+    if (
+      event.type === 'REGISTER_ROLE'
+        && event.payload.role === authority.role
+    ) {
+      issuerUsable = false;
+      issuerStatus = 'superseded';
+      continue;
+    }
+    if (
+      event.type === 'RECOVER_EXPIRED_FOREMAN'
+        && authority.role === 'FOREMAN'
+    ) {
+      issuerUsable = false;
+      issuerStatus = 'lost';
+      continue;
+    }
+    const terminalForRole = (
+      (
+        ['PACKET_UPDATED', 'CONTROL_RECONCILED', 'ARCHIVED']
+          .includes(event.type)
+          && ['CAPTAIN', 'DEV', 'REVIEW', 'RECEIPT']
+            .includes(authority.role)
+      )
+        || (
+          ['REVIEW_REWORK', 'REVIEW_PASS'].includes(event.type)
+            && authority.role === 'REVIEW'
+        )
+        || (
+          ['RECEIPT_FAIL', 'RECEIPT_PASS'].includes(event.type)
+            && authority.role === 'RECEIPT'
+        )
+        || (event.type === 'MERGED' && authority.role === 'DEV')
+    );
+    if (terminalForRole) {
+      issuerUsable = false;
+      issuerStatus = 'terminal';
+    }
+  }
+  assertControl(
+    leaseUntil === authority.lease_until
+      && issuerUsable
+      && ['active', 'idle'].includes(issuerStatus)
+      && Date.parse(registration.accepted_at)
+        <= Date.parse(events[events.length - 1].accepted_at)
+      && Date.parse(events[events.length - 1].accepted_at)
+        <= Date.parse(createdAt)
+      && Date.parse(createdAt) < Date.parse(leaseUntil),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity issuer transaction-time lease witness 非法',
+  );
+  const capabilityCapture = readStableFile(
+    registration.payload.capability_file,
+    {
+      label: 'role identity issuer replay capability',
+      parentMode: 0o700,
+      mode: 0o600,
+      maxBytes: 512,
+      stableInodeIdentity: true,
+    },
+  );
+  assertControl(
+    capabilityCapture.file_identity_sha256
+      === authority.capability_file_identity_sha256
+      && sha256(capabilityCapture.bytes.toString('utf8').trim())
+        === authority.capability_sha256,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity issuer capability bytes/file identity 漂移',
+  );
+  return leaseUntil;
+}
+
+function assertGoalRecoveryIssuerAuthorityReplay(
+  root,
+  manifest,
+  meta,
+  authority,
+  consumingEvent = null,
+  currentScope = null,
+  createdAt = null,
+) {
+  if (consumingEvent) {
+    assertControl(
+      consumingEvent.type === 'RECOVER_EXPIRED_FOREMAN'
+        && consumingEvent.payload
+        && consumingEvent.payload.goal_scope_sha256
+          === authority.recovery_scope_sha256
+        && consumingEvent.payload.goal_scope
+        && consumingEvent.payload.goal_scope.scope_sha256
+          === authority.recovery_scope_sha256,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'GOAL_RECOVERY identity consuming scope authority 漂移',
+    );
+    assertRecoveryScopeSeal(consumingEvent.payload.goal_scope);
+  } else {
+    assertControl(
+      currentScope
+        && currentScope.scope_sha256
+          === authority.recovery_scope_sha256,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'pending GOAL_RECOVERY identity current recovery scope authority 漂移',
+    );
+    assertRecoveryScopeSeal(currentScope);
+  }
+  assertControl(
+    meta,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'GOAL_RECOVERY identity metadata authority 缺失',
+  );
+  const recoveryCapability = readStableFile(
+    meta.foreman_recovery_capability_file,
+    {
+      label: 'GOAL_RECOVERY identity authority capability',
+      parentMode: 0o700,
+      mode: 0o600,
+      maxBytes: 512,
+      stableInodeIdentity: true,
+    },
+  );
+  assertControl(
+    sha256(recoveryCapability.bytes.toString('utf8').trim())
+        === authority.capability_sha256
+      && recoveryCapability.file_identity_sha256
+        === authority.capability_file_identity_sha256
+      && hashesEqual(
+        authority.capability_sha256,
+        meta.foreman_recovery_capability_sha256,
+      ),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'GOAL_RECOVERY identity capability bytes/file identity 漂移',
+  );
+  const sourceEvents = acceptedEventFiles(
+    root,
+    manifest.goal_id,
+    authority.source_task_id,
+  ).map((file) => readJson(
+    file,
+    `GOAL_RECOVERY issuer prefix ${path.basename(file)}`,
+  ));
+  const prefix = sourceEvents.slice(
+    0,
+    authority.source_state_revision,
+  );
+  assertControl(
+    Number.isSafeInteger(authority.source_state_revision)
+      && authority.source_state_revision > 0
+      && prefix.length === authority.source_state_revision
+      && prefix[prefix.length - 1].event_sha256
+        === authority.source_event_head_sha256,
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'GOAL_RECOVERY identity source accepted-event prefix 漂移',
+  );
+  const registration = prefix.find((event) => (
+    event.event_id === authority.registration_event_id
+      && ['REGISTER_ROLE', 'RECOVER_EXPIRED_FOREMAN']
+        .includes(event.type)
+  ));
+  assertControl(
+    registration
+      && registration.payload.capability_sha256
+        === authority.source_capability_sha256
+      && registration.payload.capability_file_identity_sha256
+        === authority.source_capability_file_identity_sha256
+      && registration.payload.role_identity
+      && registration.payload.role_identity.session_id
+        === authority.session_id
+      && (
+        registration.type === 'REGISTER_ROLE'
+          ? (
+            registration.payload.role === authority.role
+              && registration.payload.thread_id
+                === authority.thread_id
+              && registration.payload.host_id === authority.host_id
+              && registration.payload.attempt === authority.attempt
+          )
+          : (
+            registration.actor.thread_id === authority.thread_id
+              && registration.actor.host_id === authority.host_id
+              && registration.payload.attempt === authority.attempt
+          )
+      ),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'GOAL_RECOVERY predecessor session/source prefix authority 漂移',
+  );
+  if (consumingEvent) {
+    assertControl(
+      consumingEvent.payload.source_foreman
+        && consumingEvent.payload.source_foreman.task_id
+          === authority.source_task_id
+        && Array.isArray(consumingEvent.payload.source_task_ids)
+        && consumingEvent.payload.source_task_ids.includes(
+          authority.source_task_id,
+        )
+        && consumingEvent.payload.source_foreman.lease_until
+          === authority.lease_until,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'GOAL_RECOVERY consuming event predecessor source/lease authority 漂移',
+    );
+  }
+  let witnessedLeaseUntil =
+    registration.payload.goal_foreman_projection === true
+      ? registration.payload.projected_lease_until
+      : new Date(
+        Date.parse(registration.accepted_at)
+          + Number(registration.payload.lease_ms),
+      ).toISOString();
+  const registrationIndex = prefix.indexOf(registration);
+  for (const event of prefix.slice(registrationIndex + 1)) {
+    if (
+      event.type === 'HEARTBEAT'
+        && event.actor.role === authority.role
+        && event.actor.thread_id === authority.thread_id
+        && event.actor.host_id === authority.host_id
+    ) {
+      witnessedLeaseUntil = new Date(
+        Date.parse(event.accepted_at)
+          + Number(event.payload.lease_ms || 3_600_000),
+      ).toISOString();
+    }
+  }
+  const sourceCapability = readStableFile(
+    registration.payload.capability_file,
+    {
+      label: 'GOAL_RECOVERY predecessor capability witness',
+      parentMode: 0o700,
+      mode: 0o600,
+      maxBytes: 512,
+      stableInodeIdentity: true,
+    },
+  );
+  const sealedScope = consumingEvent
+    ? consumingEvent.payload.goal_scope
+    : currentScope;
+  const sourceBinding = sealedScope.tasks.find(
+    (task) => task.task_id === authority.source_task_id,
+  );
+  assertControl(
+    witnessedLeaseUntil === authority.lease_until
+      && sourceCapability.file_identity_sha256
+        === authority.source_capability_file_identity_sha256
+      && sha256(sourceCapability.bytes.toString('utf8').trim())
+        === authority.source_capability_sha256
+      && sourceBinding
+      && sourceBinding.foreman
+      && sourceBinding.foreman.thread_id === authority.thread_id
+      && sourceBinding.foreman.host_id === authority.host_id
+      && sourceBinding.foreman.attempt === authority.attempt
+      && sourceBinding.foreman.lease_until === authority.lease_until
+      && sourceBinding.foreman.registration_event_id
+        === authority.registration_event_id
+      && Date.parse(registration.accepted_at)
+        <= Date.parse(prefix[prefix.length - 1].accepted_at)
+      && Date.parse(prefix[prefix.length - 1].accepted_at)
+        <= Date.parse(createdAt)
+      && (
+        Date.parse(authority.lease_until) <= Date.parse(createdAt)
+          || (
+            sourceBinding.foreman.status === 'lost'
+              && sourceBinding.recovery_sha256 !== null
+          )
+      ),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'GOAL_RECOVERY predecessor historical lease/eligibility witness 漂移',
+  );
+}
+
+function assertRoleIdentityAuthorityReplay(
+  root,
+  paths,
+  snapshot,
+  meta = null,
+  manifest = null,
+  control = null,
+) {
+  const protocolVersion = meta
+    ? Number(meta.role_identity_protocol_version || 1)
+    : 1;
+  if (
+    protocolVersion >= 2
+      && fs.existsSync(paths.roleIdentityIntents)
+  ) {
+    const legacyNames = fs.readdirSync(paths.roleIdentityIntents)
+      .filter((name) => (
+        /^[0-9a-f]{64}\.json$/.test(name)
+          || /^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name)
+      ));
+    assertControl(
+      legacyNames.length === 0,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'v2 role identity goal 禁止任何 legacy pending/authority artifact',
+    );
+  }
+  let inventory;
+  try {
+    inventory = roleIdentityInventory(paths);
+  } catch {
+    throw new ControlError(
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity append-only inventory 无法验证',
+    );
+  }
+  assertControl(
+    protocolVersion >= 2
+      ? inventory.every((entry) => entry.format === 'BUNDLE_V2')
+      : inventory.every((entry) => entry.format === 'LEGACY_V1'),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity inventory format 与 durable protocol marker 不一致',
+  );
+  const operations = new Map();
+  const slots = new Map();
+  for (const entry of inventory) {
+    operations.set(
+      entry.operation_id,
+      (operations.get(entry.operation_id) || 0) + 1,
+    );
+    slots.set(
+      entry.semantic_slot_sha256,
+      (slots.get(entry.semantic_slot_sha256) || 0) + 1,
+    );
+  }
+  assertControl(
+    protocolVersion < 2
+      || [...operations.values(), ...slots.values()]
+        .every((count) => count === 1),
+    'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+    'role identity append-only inventory 存在 duplicate operation/semantic slot/mixed format authority',
+  );
+  if (protocolVersion >= 2) {
+    const childrenByPredecessor = new Map();
+    const generationByBase = new Map();
+    for (const entry of inventory) {
+      const predecessor =
+        entry.intent.predecessor_intent_sha256 || null;
+      const renewalIndex = Number(entry.intent.renewal_index || 0);
+      if (predecessor) {
+        childrenByPredecessor.set(
+          predecessor,
+          (childrenByPredecessor.get(predecessor) || 0) + 1,
+        );
+      }
+      const baseSlot = hashObject({
+        schema_version: 1,
+        kind: 'ROLE_IDENTITY_SEMANTIC_SLOT',
+        goal_id: entry.intent.goal_id,
+        task_id: entry.intent.task_id,
+        role: entry.intent.role,
+        attempt: entry.intent.attempt,
+        state_revision: entry.intent.state_revision,
+        control_epoch: entry.intent.control_epoch,
+        packet: entry.intent.packet,
+        base_head: entry.intent.base_head,
+        full_head: entry.intent.full_head,
+        task_cycle: entry.intent.task_cycle,
+      });
+      const generationKey = `${baseSlot}:${renewalIndex}`;
+      generationByBase.set(
+        generationKey,
+        (generationByBase.get(generationKey) || 0) + 1,
+      );
+    }
+    assertControl(
+      [...childrenByPredecessor.values()].every((count) => count === 1)
+        && [...generationByBase.values()].every((count) => count === 1),
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity renewal lineage fork/disconnected generation 非法',
+    );
+  }
+  for (const entry of inventory) {
+    if (protocolVersion >= 2 && manifest) {
+      try {
+        verifyRoleIdentityObservationRecord(
+          entry.intent.identity_observation.signed_record,
+          manifest.probe_observation_receipts.host_attestation,
+        );
+      } catch {
+        throw new ControlError(
+          'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+          'pending role identity signed observation authentication 漂移',
+        );
+      }
+    }
+    assertControl(
+      protocolVersion < 2
+        || (
+          Date.parse(entry.intent.identity_observation.observed_at)
+            <= Date.parse(entry.intent.created_at)
+            && Date.parse(entry.intent.created_at)
+              < Date.parse(entry.intent.identity_observation.expires_at)
+            && entry.bundle
+            && entry.bundle.challenge
+            && Date.parse(entry.intent.created_at)
+              <= Date.parse(entry.bundle.challenge.issued_at)
+            && Date.parse(entry.bundle.challenge.issued_at)
+              < Date.parse(entry.bundle.challenge.expires_at)
+        ),
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity observation/intent/challenge chronology 漂移',
+    );
+    const allAccepted = (manifest ? manifest.tasks : [])
+      .flatMap((task) => acceptedEventFiles(
+        root,
+        manifest.goal_id,
+        task.id,
+      ).map((file) => readJson(
+        file,
+        `accepted role identity namespace event ${path.basename(file)}`,
+      )));
+    const accepted = allAccepted.filter((event) => (
+      event.event_id === entry.operation_id
+        || (
+          event.type === 'RECOVER_EXPIRED_FOREMAN'
+            && event.payload
+            && event.payload.root_recovery_id === entry.operation_id
+        )
+    ));
+    const acceptedControl = control && Array.isArray(control.events)
+      ? control.events.filter(
+        (event) => event.event_id === entry.operation_id,
+      )
+      : [];
+    assertControl(
+      acceptedControl.length === 0
+        && accepted.every(
+          (event) => exactRoleIdentityConsumer(entry, event, meta),
+        )
+        && (
+          accepted.length === 0
+            || entry.intent.issuer_authority.kind === 'GOAL_RECOVERY'
+            || accepted.length === 1
+        ),
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity operation namespace 被非 canonical consumer 占用',
+    );
+    assertControl(
+      entry.intent.issuer_authority.kind !== 'CURRENT_SESSION'
+        || entry.intent.issuer_authority.source_task_id
+          === entry.intent.task_id,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'CURRENT_SESSION role identity issuer source task 漂移',
+    );
+    assertControl(
+      entry.intent.issuer_authority.kind !== 'SESSION'
+        || entry.intent.role === 'FOREMAN'
+        || entry.intent.issuer_authority.source_task_id
+          === entry.intent.task_id,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'non-FOREMAN SESSION role identity issuer source task 漂移',
+    );
+    if (
+      manifest
+        && meta
+        && accepted.length === 0
+        && entry.intent.issuer_authority.kind === 'BOOTSTRAP'
+    ) {
+      const bootstrapCapability = readStableFile(
+        meta.bootstrap_capability_file,
+        {
+          label: 'pending BOOTSTRAP identity authority capability',
+          parentMode: 0o700,
+          mode: 0o600,
+          maxBytes: 512,
+          stableInodeIdentity: true,
+        },
+      );
+      assertControl(
+        entry.intent.issuer_authority
+          .bootstrap_init_receipt_sha256 === meta.init_receipt_sha256
+          && sha256(
+            bootstrapCapability.bytes.toString('utf8').trim(),
+          ) === entry.intent.issuer_authority.capability_sha256
+          && bootstrapCapability.file_identity_sha256
+            === entry.intent.issuer_authority
+              .capability_file_identity_sha256
+          && hashesEqual(
+            entry.intent.issuer_authority.capability_sha256,
+            meta.bootstrap_capability_sha256,
+          ),
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'pending BOOTSTRAP identity authority 漂移',
+      );
+    }
+    if (
+      manifest
+        && ['SESSION', 'CURRENT_SESSION'].includes(
+          entry.intent.issuer_authority.kind,
+        )
+    ) {
+      issuerLeaseWitnessAt(
+        root,
+        manifest,
+        entry.intent.issuer_authority,
+        entry.intent.created_at,
+      );
+    }
+    if (
+      manifest
+        && meta
+        && control
+        && accepted.length === 0
+        && entry.intent.issuer_authority.kind === 'GOAL_RECOVERY'
+    ) {
+      const currentLoaded = {
+        manifest,
+        meta,
+        control,
+        snapshot,
+        lastEventHashes: Object.fromEntries(
+          manifest.tasks.map((task) => [
+            task.id,
+            snapshot.tasks[task.id]
+              && snapshot.tasks[task.id].last_event
+              ? snapshot.tasks[task.id].last_event.event_sha256
+              : null,
+          ]),
+        ),
+      };
+      const lineage = canonicalForemanRecoveryLineage(
+        currentLoaded,
+        entry.intent.task_id,
+      );
+      assertControl(
+        lineage.successorAttempt === entry.intent.attempt
+          && lineage.predecessorSession.source_task_id
+            === entry.intent.issuer_authority.source_task_id
+          && lineage.predecessorSession.thread_id
+            === entry.intent.issuer_authority.thread_id
+          && lineage.predecessorSession.host_id
+            === entry.intent.issuer_authority.host_id
+          && lineage.predecessorSession.attempt
+            === entry.intent.issuer_authority.attempt
+          && lineage.predecessorSession.lease_until
+            === entry.intent.issuer_authority.lease_until,
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'pending GOAL_RECOVERY predecessor lineage 漂移',
+      );
+      assertGoalRecoveryIssuerAuthorityReplay(
+        root,
+        manifest,
+        meta,
+        entry.intent.issuer_authority,
+        null,
+        lineage.scope,
+        entry.intent.created_at,
+      );
+    }
+    if (entry.intent.predecessor_intent_sha256 !== undefined) {
+      const predecessor = inventory.find((candidate) => (
+        candidate.intent.intent_sha256
+          === entry.intent.predecessor_intent_sha256
+      ));
+      assertControl(
+        predecessor
+          && entry.intent.renewal_index
+            === Number(predecessor.intent.renewal_index || 0) + 1
+          && predecessor.intent.goal_id === entry.intent.goal_id
+          && predecessor.intent.task_id === entry.intent.task_id
+          && predecessor.intent.role === entry.intent.role
+          && predecessor.intent.attempt === entry.intent.attempt
+          && predecessor.intent.state_revision
+            === entry.intent.state_revision
+          && predecessor.intent.control_epoch
+            === entry.intent.control_epoch
+          && hashObject(predecessor.intent.packet)
+            === hashObject(entry.intent.packet)
+          && predecessor.intent.base_head === entry.intent.base_head
+          && predecessor.intent.full_head === entry.intent.full_head
+          && predecessor.intent.task_cycle === entry.intent.task_cycle
+          && Date.parse(
+            predecessor.intent.identity_observation.expires_at,
+          ) <= Date.parse(entry.intent.created_at),
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity renewal predecessor lineage 缺失或漂移',
+      );
+    }
+  }
+  const allSessions = Object.entries(snapshot.tasks || {})
+    .flatMap(([taskId, task]) => [
+      ...Object.values(task.sessions || {}),
+      ...Object.values(task.session_history || {}).flat(),
+    ].map((session) => ({ taskId, session })));
+  const acceptedSessions = allSessions.filter(({ session }) => (
+      session
+        && session.role_identity
+        && session.role_identity.protocol
+          === 'goalctl-role-identity-intent-v2'
+    ));
+  for (const { taskId, session } of acceptedSessions) {
+    const binding = session.role_identity;
+    const workerBinding = session.worker_bootstrap || null;
+    const registrationProbe =
+      session.registration_probe_observation
+        || session.probe_observation
+        || null;
+    assertControl(
+      workerBinding === null
+        ? binding.worker_bootstrap_binding_sha256 === null
+        : workerBinding.binding_sha256
+          === binding.worker_bootstrap_binding_sha256,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'accepted role identity session sibling authority 漂移',
+    );
+    const inventoryEntry = inventory.find((entry) => (
+      entry.operation_id === binding.operation_id
+    ));
+    const bundleEntry = inventoryEntry;
+    const bundle = bundleEntry && bundleEntry.bundle;
+    const recoveryEvent = bundle
+      && bundle.intent.issuer_authority.kind === 'GOAL_RECOVERY'
+      && manifest
+      ? acceptedEventFiles(
+        root,
+        manifest.goal_id,
+        taskId,
+      ).map((file) => readJson(
+        file,
+        `accepted GOAL_RECOVERY identity event ${path.basename(file)}`,
+      )).find((event) => (
+        event.type === 'RECOVER_EXPIRED_FOREMAN'
+          && event.event_id === session.registration_event_id
+      ))
+      : null;
+    const recoverySibling = recoveryEvent
+      && recoveryEvent.payload.root_recovery_id
+        === binding.operation_id
+      && recoveryEvent.event_id === (
+        taskId === bundle.intent.task_id
+          ? binding.operation_id
+          : recoveryEventId(binding.operation_id, taskId)
+      )
+      && Array.isArray(recoveryEvent.payload.scope_task_ids)
+      && recoveryEvent.payload.scope_task_ids.includes(taskId)
+      && session.recovery_event_id === binding.operation_id
+      && session.registration_event_id === recoveryEvent.event_id;
+    const canonicalAuthorizedBy = bundle
+      ? roleIdentityRegistrationAuthorizedBy(
+        bundle.intent,
+        meta,
+      )
+      : session.authorized_by;
+    const issuer = bundle
+      && ['SESSION', 'CURRENT_SESSION'].includes(
+        bundle.intent.issuer_authority.kind,
+      )
+      ? allSessions.find(({ taskId: issuerTaskId, session: candidate }) => (
+        issuerTaskId === bundle.intent.issuer_authority.source_task_id
+          && candidate
+          && candidate.role === bundle.intent.issuer_authority.role
+          && candidate.thread_id
+            === bundle.intent.issuer_authority.thread_id
+          && candidate.host_id === bundle.intent.issuer_authority.host_id
+          && candidate.attempt === bundle.intent.issuer_authority.attempt
+          && candidate.registration_event_id
+            === bundle.intent.issuer_authority.registration_event_id
+          && candidate.role_identity
+          && candidate.role_identity.session_id
+            === bundle.intent.issuer_authority.session_id
+      ))
+      : null;
+    if (bundle && manifest) {
+      verifyRoleIdentityObservationRecord(
+        bundle.intent.identity_observation.signed_record,
+        manifest.probe_observation_receipts.host_attestation,
+      );
+    }
+    assertControl(
+      inventoryEntry
+        && inventoryEntry.format === 'BUNDLE_V2'
+        && bundle
+        && bundle.bundle_sha256 === binding.bundle_sha256
+        && bundleEntry.file_identity_sha256
+          === binding.bundle_file_identity_sha256
+        && bundle.semantic_slot_sha256
+          === binding.semantic_slot_sha256
+        && bundle.intent.intent_sha256 === binding.intent_sha256
+        && (
+          bundle.intent.task_id === taskId
+            || recoverySibling
+        )
+        && bundle.intent.role === session.role
+        && bundle.intent.session_id === binding.session_id
+        && bundle.intent.thread_id === session.thread_id
+        && bundle.intent.host_id === session.host_id
+        && bundle.intent.attempt === session.attempt
+        && bundle.intent.launch_id === session.launch_id
+        && bundle.intent.state_revision === binding.state_revision
+        && bundle.intent.control_epoch === binding.control_epoch
+        && bundle.intent.packet.revision === binding.packet_revision
+        && bundle.intent.packet.sha256 === binding.packet_sha256
+        && bundle.intent.base_head === binding.base_head
+        && bundle.intent.full_head === binding.full_head
+        && bundle.intent.task_cycle === binding.task_cycle
+        && bundle.challenge.record_sha256
+          === binding.challenge_record_sha256
+        && registrationProbe
+        && bundle.challenge.challenge
+          === registrationProbe.challenge
+        && bundle.challenge.canary_plan_sha256
+          === registrationProbe.canary_plan_sha256
+        && registrationProbe.binding_sha256
+          === binding.probe_observation_binding_sha256
+        && hashObject(bundle.intent.issuer_authority)
+          === binding.issuer_authority_sha256
+        && bundle.intent.identity_observation.record_sha256
+          === binding.identity_observation_record_sha256
+        && bundle.intent.identity_observation.receipt_sha256
+          === binding.identity_observation_receipt_sha256
+        && bundle.intent.identity_observation
+          .receipt_file_identity_sha256
+          === binding
+            .identity_observation_receipt_file_identity_sha256
+        && bundle.intent.identity_observation
+          .worker_bootstrap_binding_sha256
+          === binding.worker_bootstrap_binding_sha256
+        && (
+          bundle.intent.worker_bootstrap_authority === null
+            ? binding.worker_bootstrap_authority_sha256 === null
+            : hashObject(bundle.intent.worker_bootstrap_authority)
+              === binding.worker_bootstrap_authority_sha256
+        )
+        && hashObject(
+          canonicalAuthorizedBy,
+        ) === binding.registration_authorized_by_sha256,
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'accepted role identity append-only authority 缺失或漂移',
+    );
+    if (
+      ['SESSION', 'CURRENT_SESSION'].includes(
+        bundle.intent.issuer_authority.kind,
+      )
+    ) {
+      issuerLeaseWitnessAt(
+        root,
+        manifest,
+        bundle.intent.issuer_authority,
+        bundle.intent.created_at,
+      );
+      assertControl(
+        issuer
+          && issuer.session.capability_sha256
+            === bundle.intent.issuer_authority.capability_sha256
+          && Date.parse(issuer.session.registered_at)
+            <= Date.parse(bundle.intent.created_at)
+          && Number.isFinite(Date.parse(
+            bundle.intent.issuer_authority.lease_until,
+          )),
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity issuer session lineage 不存在或 transaction-time lease 非法',
+      );
+    } else if (bundle.intent.issuer_authority.kind === 'BOOTSTRAP') {
+      assertControl(
+        meta
+          && bundle.intent.issuer_authority
+            .bootstrap_init_receipt_sha256 === meta.init_receipt_sha256,
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity bootstrap init authority 漂移',
+      );
+    } else if (
+      bundle.intent.issuer_authority.kind === 'GOAL_RECOVERY'
+    ) {
+      assertGoalRecoveryIssuerAuthorityReplay(
+        root,
+        manifest,
+        meta,
+        bundle.intent.issuer_authority,
+        recoveryEvent,
+        null,
+        bundle.intent.created_at,
+      );
+    }
+  }
+}
+
+function roleIdentityRegistrationAuthorizedBy(intent, meta) {
+  const authority = intent.issuer_authority;
+  if (authority.kind === 'BOOTSTRAP') {
+    assertControl(
+      meta && typeof meta.bootstrap_capability_file === 'string',
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity bootstrap metadata authority 缺失',
+    );
+    return {
+      role: 'BOOTSTRAP',
+      capability_file: meta.bootstrap_capability_file,
+    };
+  }
+  if (authority.kind === 'GOAL_RECOVERY') {
+    assertControl(
+      meta && typeof meta.foreman_recovery_capability_file === 'string',
+      'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+      'role identity recovery metadata authority 缺失',
+    );
+    return {
+      role: 'GOAL_RECOVERY',
+      capability_file: meta.foreman_recovery_capability_file,
+    };
+  }
+  return {
+    role: authority.role,
+    thread_id: authority.thread_id,
+    host_id: authority.host_id,
+    attempt: authority.attempt,
+  };
+}
+
 function loadGoalStateUnlocked(root, goalId, options = {}) {
   const { paths, manifest, meta, control } = loadGoalFiles(root, goalId, options);
-  const { snapshot, eventIndexes, lastEventHashes } = buildSnapshot(root, manifest, control, options);
+  const { snapshot, eventIndexes, lastEventHashes } = buildSnapshot(
+    root,
+    manifest,
+    control,
+    {
+      ...options,
+      roleIdentityProtocolVersion:
+        meta.role_identity_protocol_version || 1,
+    },
+  );
+  assertRoleIdentityAuthorityReplay(
+    root,
+    paths,
+    snapshot,
+    meta,
+    manifest,
+    control,
+  );
   const bootstrapConsumption = reconcileBootstrapConsumption(
     root,
     {
@@ -2788,6 +5454,303 @@ function loadGoalState(cwd, goalId) {
   }, { allowOddCrashInspection: true });
 }
 
+function pendingRoleIdentityIntent(root, loaded, taskId) {
+  const directory = loaded.paths.roleIdentityIntents;
+  if (!fs.existsSync(directory)) return null;
+  ensurePrivateDirectory(directory, { repair: false });
+  const candidates = [];
+  for (const name of fs.readdirSync(directory).sort()) {
+    if (/^[0-9a-f]{64}\.json$/.test(name)) continue;
+    const isBundle =
+      /^[0-9a-f]{64}\.role-identity-bundle\.json$/.test(name);
+    const isLegacy =
+      /^[0-9a-f]{64}\.role-identity-intent\.json$/.test(name);
+    assertControl(
+      isBundle || isLegacy,
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity intent inventory 含未知文件 sha256=${sha256(name)}`,
+    );
+    const file = path.join(directory, name);
+    const stat = fs.lstatSync(file);
+    assertControl(
+      stat.isFile()
+        && !stat.isSymbolicLink()
+        && (stat.mode & 0o077) === 0
+        && (
+          typeof process.getuid !== 'function'
+            || stat.uid === process.getuid()
+      ),
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity intent inventory file sha256=${sha256(name)} 非法`,
+    );
+    const intent = isBundle
+      ? validateRoleIdentityBundle(
+        readPrivateRoleIdentityJson(
+          file,
+          'role identity atomic bundle',
+        ),
+      ).intent
+      : validateLegacyRoleIdentityIntent(
+        readPrivateRoleIdentityJson(
+          file,
+          'legacy role identity intent',
+        ),
+      );
+    const expectedName = isBundle
+      ? path.basename(
+        roleIdentityBundleFile(
+          loaded.paths,
+          intent.semantic_slot_sha256,
+        ),
+      )
+      : `${sha256(intent.operation_id)}.role-identity-intent.json`;
+    assertControl(
+      name === expectedName,
+      'ROLE_IDENTITY_INTENT_INVALID',
+      `role identity intent inventory path binding sha256=${sha256(name)} 非法`,
+    );
+    if (
+      intent.goal_id !== loaded.manifest.goal_id
+        || intent.task_id !== taskId
+    ) {
+      continue;
+    }
+    const state = loaded.snapshot.tasks[taskId];
+    if (
+      ['DEV', 'REVIEW', 'RECEIPT'].includes(intent.role)
+        && !workerRoleIdentityRegistrationEligible(
+          state,
+          intent.role,
+        )
+    ) {
+      continue;
+    }
+    const accepted = goalEventIdOccurrences(
+      loaded,
+      intent.operation_id,
+    );
+    const acceptedControl = goalControlEventOccurrences(
+      loaded,
+      intent.operation_id,
+    );
+    if (accepted.length > 0 || acceptedControl.length > 0) {
+      const acceptedEvent = accepted.length === 1
+        ? acceptedGoalEvent(
+          root,
+          loaded,
+          accepted[0].task_id,
+          intent.operation_id,
+        )
+        : null;
+      assertControl(
+        acceptedControl.length === 0
+          && accepted.length === 1
+          && exactRoleIdentityConsumer(
+            {
+              operation_id: intent.operation_id,
+              intent,
+              bundle: isBundle
+                ? validateRoleIdentityBundle(
+                  readPrivateRoleIdentityJson(
+                    file,
+                    'role identity atomic bundle',
+                  ),
+                )
+                : null,
+              file_identity_sha256: isBundle
+                ? readPrivateRoleIdentityJson(
+                  file,
+                  'role identity atomic bundle',
+                  true,
+                ).file_identity_sha256
+                : null,
+            },
+            acceptedEvent,
+            loaded.meta,
+          ),
+        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
+        'role identity intent operation namespace 被非 canonical consumer 占用',
+      );
+      continue;
+    }
+    if (
+      intent.state_revision !== state.state_revision
+        || intent.control_epoch !== loaded.control.epoch
+        || intent.packet.revision !== state.packet.revision
+        || intent.packet.sha256 !== state.packet.sha256
+        || intent.base_head !== state.base_head
+        || intent.full_head !== state.full_head
+        || intent.task_cycle !== state.task_cycle
+        || Date.parse(intent.identity_observation.expires_at)
+          <= runtimeNowMilliseconds()
+    ) {
+      continue;
+    }
+    const session = state.sessions[intent.role] || null;
+    if (
+      session
+        && ['active', 'idle'].includes(session.status)
+        && Date.parse(session.lease_until) > runtimeNowMilliseconds()
+    ) {
+      continue;
+    }
+    candidates.push({
+      intent,
+      allowLegacy: !isBundle,
+    });
+  }
+  assertControl(
+    candidates.length <= 1,
+    'ROLE_IDENTITY_INTENT_CONFLICT',
+    `task ${taskId} 同时存在多个 current role identity intent`,
+  );
+  return candidates.length === 0
+    ? null
+    : publicRoleIdentityIntent(
+      candidates[0].intent,
+      { allowLegacy: candidates[0].allowLegacy },
+    );
+}
+
+function registrationRoleIdentityBinding(
+  loaded,
+  state,
+  options,
+  eventId = registrationStableEventId(options),
+  workerBootstrap = null,
+  probeObservation = null,
+  bundleEntryOverride = undefined,
+) {
+  if (!probeObservationProtocolRequired(loaded.manifest)) return null;
+  const bundleEntry = bundleEntryOverride === undefined
+    ? readRoleIdentityBundleEntryByOperation(
+      loaded.paths,
+      eventId,
+    )
+    : bundleEntryOverride;
+  const bundle = bundleEntry && bundleEntry.bundle;
+  const intent = bundle
+    ? bundle.intent
+    : readRoleIdentityIntent(loaded.paths, eventId);
+  assertControl(
+    intent,
+    'ROLE_IDENTITY_INTENT_REQUIRED',
+    'probe-enabled registration 必须消费 upstream canary transaction 的 durable role identity intent',
+  );
+  const refreshConsumer =
+    options.roleIdentityConsumer === 'PROBE_OBSERVATION_REFRESHED';
+  assertControl(
+    bundle === null
+      || (
+        refreshConsumer
+          ? intent.issuer_authority.kind === 'CURRENT_SESSION'
+          : intent.issuer_authority.kind !== 'CURRENT_SESSION'
+      ),
+    'ROLE_IDENTITY_INTENT_MISMATCH',
+    'role identity intent consumer kind/issuer authority 不匹配',
+  );
+  if (
+    registrationRequiresWorkerBootstrap(
+      loaded.manifest,
+      intent.role,
+    )
+  ) {
+    assertControl(
+      workerBootstrap
+        && intent.identity_observation
+          .worker_bootstrap_binding_sha256
+          === workerBootstrap.binding_sha256,
+      'ROLE_IDENTITY_WORKER_BOOTSTRAP_MISMATCH',
+      'worker role identity observation 必须绑定 exact validated worker bootstrap receipt',
+    );
+  }
+  const hostId = options.hostId || 'local';
+  const attempt = Number(options.attempt || 1);
+  assertControl(
+    intent.goal_id === loaded.manifest.goal_id
+      && intent.task_id === options.taskId
+      && intent.role === options.role
+      && intent.thread_id === options.threadId
+      && intent.host_id === hostId
+      && intent.attempt === attempt
+      && intent.launch_id === (options.launchId || null)
+      && intent.state_revision === state.state_revision
+      && intent.control_epoch === loaded.control.epoch
+      && intent.packet.revision === state.packet.revision
+      && intent.packet.sha256 === state.packet.sha256
+      && intent.base_head === state.base_head
+      && intent.full_head === state.full_head
+      && intent.task_cycle === state.task_cycle,
+    'ROLE_IDENTITY_INTENT_MISMATCH',
+    'registration identity/launch/session/revision/HEAD 与 upstream intent 不一致',
+  );
+  assertControl(
+    Date.parse(intent.identity_observation.expires_at)
+      > runtimeNowMilliseconds(),
+    'ROLE_IDENTITY_INTENT_EXPIRED',
+    'upstream role identity intent 已过期',
+  );
+  const base = {
+    protocol: bundle
+      ? 'goalctl-role-identity-intent-v2'
+      : 'goalctl-role-identity-intent-v1',
+    operation_id: intent.operation_id,
+    intent_sha256: intent.intent_sha256,
+    session_id: intent.session_id,
+    thread_id: intent.thread_id,
+    host_id: intent.host_id,
+    attempt: intent.attempt,
+    launch_id: intent.launch_id,
+    identity_observation_receipt_sha256:
+      intent.identity_observation.receipt_sha256,
+  };
+  if (!bundle) return base;
+  assertControl(
+    probeObservation === null
+      || (
+        probeObservation.challenge === bundle.challenge.challenge
+          && probeObservation.canary_plan_sha256
+            === bundle.challenge.canary_plan_sha256
+          && probeObservation.thread_id === intent.thread_id
+          && probeObservation.host_id === intent.host_id
+          && probeObservation.attempt === intent.attempt
+      ),
+    'ROLE_IDENTITY_OBSERVATION_BINDING_MISMATCH',
+    'registration probe observation 与 captured identity challenge 不一致',
+  );
+  return {
+    ...base,
+    semantic_slot_sha256: intent.semantic_slot_sha256,
+    bundle_sha256: bundle.bundle_sha256,
+    bundle_file_identity_sha256:
+      bundleEntry.file_identity_sha256,
+    issuer_authority_sha256: hashObject(intent.issuer_authority),
+    identity_observation_record_sha256:
+      intent.identity_observation.record_sha256,
+    identity_observation_receipt_file_identity_sha256:
+      intent.identity_observation.receipt_file_identity_sha256,
+    worker_bootstrap_binding_sha256:
+      intent.identity_observation.worker_bootstrap_binding_sha256,
+    worker_bootstrap_authority_sha256:
+      intent.worker_bootstrap_authority === null
+        ? null
+        : hashObject(intent.worker_bootstrap_authority),
+    state_revision: intent.state_revision,
+    control_epoch: intent.control_epoch,
+    packet_revision: intent.packet.revision,
+    packet_sha256: intent.packet.sha256,
+    base_head: intent.base_head,
+    full_head: intent.full_head,
+    task_cycle: intent.task_cycle,
+    challenge_record_sha256: bundle.challenge.record_sha256,
+    probe_observation_binding_sha256:
+      probeObservation ? probeObservation.binding_sha256 : null,
+    registration_authorized_by_sha256: hashObject(
+      roleIdentityRegistrationAuthorizedBy(intent, loaded.meta),
+    ),
+  };
+}
+
 function loadGoalStateReadOnly(cwd, goalId, consume = null, options = {}) {
   const root = controlRoot(cwd);
   return withStableRead(root, () => {
@@ -2806,6 +5769,17 @@ function loadGoalStateReadOnly(cwd, goalId, consume = null, options = {}) {
       loaded.manifest,
       { readOnly: true },
     );
+    for (const taskId of Object.keys(public_snapshot.tasks || {})) {
+      const identityIntent = pendingRoleIdentityIntent(
+        root,
+        loaded,
+        taskId,
+      );
+      if (identityIntent) {
+        public_snapshot.tasks[taskId].role_identity_intent =
+          identityIntent;
+      }
+    }
     if (loaded.meta.goal_input_head) {
       public_snapshot.goal_input_head = loaded.meta.goal_input_head;
       public_snapshot.goal_input_source = loaded.meta.goal_input_source;
@@ -3149,6 +6123,27 @@ function authorizeRegistrationRetry(root, loaded, state, options, accepted) {
     'REGISTRATION_IDEMPOTENCY_MISMATCH',
     'accepted registration 在 current/session_history 中缺少原始 session',
   );
+  if (
+    accepted.payload.role_identity
+      && accepted.payload.role_identity.protocol
+        === 'goalctl-role-identity-intent-v2'
+  ) {
+    const currentCapabilityFileIdentitySha256 =
+      capabilityFileIdentitySha256(
+        session.capability_file,
+        'accepted registration capability identity',
+      );
+    assertControl(
+      typeof accepted.payload.capability_file_identity_sha256
+        === 'string'
+        && session.capability_file_identity_sha256
+          === accepted.payload.capability_file_identity_sha256
+        && currentCapabilityFileIdentitySha256
+          === accepted.payload.capability_file_identity_sha256,
+      'REGISTRATION_IDEMPOTENCY_MISMATCH',
+      'accepted v2 registration capability inode authority 漂移',
+    );
+  }
   if (options.actorCapabilityFile) {
     const actorCapability = readCapabilityFile(
       options.actorCapabilityFile,
@@ -3249,6 +6244,55 @@ function authorizeRegistrationRetry(root, loaded, state, options, accepted) {
     'accepted registration capability 与 session hash 不一致',
   );
   return session;
+}
+
+function assertAcceptedRegistrationRetryIdentityAuthority(
+  loaded,
+  accepted,
+  registrationBundleCapture,
+) {
+  const bundleRequired =
+    probeObservationProtocolRequired(loaded.manifest);
+  const roleIdentity = accepted
+    && accepted.payload
+    && accepted.payload.role_identity;
+  const probeObservation = accepted
+    && accepted.payload
+    && accepted.payload.probe_observation;
+  if (!bundleRequired) {
+    assertControl(
+      registrationBundleCapture === null
+        && roleIdentity === undefined
+        && probeObservation === undefined,
+      'EVENT_ID_CONFLICT',
+      'markerless/no-probe accepted registration 禁止消费 role identity bundle',
+    );
+    return;
+  }
+  assertControl(
+    Number(loaded.meta.role_identity_protocol_version || 1) >= 2
+      && roleIdentity
+      && roleIdentity.protocol
+        === 'goalctl-role-identity-intent-v2'
+      && probeObservation
+      && registrationBundleCapture
+      && exactRoleIdentityConsumer(
+        {
+          ...registrationBundleCapture,
+          operation_id:
+            registrationBundleCapture.bundle.operation_id,
+          intent: registrationBundleCapture.bundle.intent,
+        },
+        accepted,
+        loaded.meta,
+      ),
+    'EVENT_ID_CONFLICT',
+    'accepted registration 与 descriptor-bound role identity bundle 不匹配',
+  );
+  assertRegistrationBundleCaptureCurrent(
+    loaded.paths,
+    registrationBundleCapture,
+  );
 }
 
 function assertFreshGoalRoleIdentity(snapshot, taskId, role, threadId) {
@@ -3389,6 +6433,7 @@ function buildForemanRecoveryEvent(options) {
     leaseMilliseconds,
     originalScope,
     probeObservation,
+    roleIdentity,
     reason,
     requestSha256,
     rootRecoveryId,
@@ -3419,11 +6464,20 @@ function buildForemanRecoveryEvent(options) {
       status: 'active',
       capability_sha256: capability.sha256,
       capability_file: capability.file,
+      ...(roleIdentity
+        ? {
+          capability_file_identity_sha256:
+            capability.file_identity_sha256,
+        }
+        : {}),
       reason,
       incident_ref: incidentRef,
       request_sha256: requestSha256,
       ...(probeObservation
         ? { probe_observation: probeObservation }
+        : {}),
+      ...(roleIdentity
+        ? { role_identity: roleIdentity }
         : {}),
       root_recovery_id: rootRecoveryId,
       goal_scope: originalScope,
@@ -4795,7 +7849,7 @@ function finalizeAcceptedMechanicalP1Transaction(
     assertControl(
       !accepted.p1_commit_transaction,
       'CORRUPT_STORE',
-      `accepted P1 transaction ${accepted.event_id} 缺 retained intent/bundle`,
+      ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
     );
     if (receipt) {
       assertControl(
@@ -8344,6 +11398,10 @@ function acceptEventUnderLock(cwd, rawEvent, actorCapabilityFile, authorization 
         'GITHUB_MERGE_WRAPPER_REQUIRED',
         'GitHub merge authorization 只允许 canonical merge-pr 使用',
       );
+      assertRoleIdentityOperationAvailable(
+        loaded.paths,
+        event.event_id,
+      );
       assertControl(
         goalControlEventOccurrences(loaded, event.event_id).length === 0,
         'EVENT_ID_CONFLICT',
@@ -9447,6 +12505,10 @@ function acceptEvent(cwd, rawEvent, actorCapabilityFile, authorization = {}) {
           } catch {
             return;
           }
+          assertRoleIdentityOperationAvailable(
+            goalPaths(root, goalId),
+            eventId,
+          );
           const durableCandidate = acceptedEventFiles(root, goalId, taskId)
             .map((file) => readJson(
               file,
@@ -10420,6 +13482,88 @@ function assertForemanRecoveryIntentRecoveryBoundary(
   return true;
 }
 
+function completedForemanRecoveryRetryResult(root, options) {
+  const goalId = safeId(options.goalId, 'goal_id');
+  const rootRecoveryId = safeId(
+    options.eventId,
+    'root recovery event_id',
+  );
+  const paths = goalPaths(root, goalId);
+  const batch = recoveryBatchState(
+    paths,
+    goalId,
+    rootRecoveryId,
+  );
+  if (!batch.intent || !batch.commit) return null;
+  const loaded = loadGoalStateUnlocked(root, goalId, {
+    repairHeads: false,
+    repairBootstrapConsumption: false,
+  });
+  assertControl(
+    loaded.snapshot.tasks[options.taskId],
+    'UNKNOWN_TASK',
+    `未知 task ${options.taskId}`,
+  );
+  const recoveryAuthority = readCapabilityFile(
+    options.foremanRecoveryCapabilityFile,
+    loaded.meta.foreman_recovery_capability_file,
+  );
+  assertControl(
+    hashesEqual(
+      recoveryAuthority.sha256,
+      loaded.meta.foreman_recovery_capability_sha256,
+    ),
+    'CAPABILITY_INVALID',
+    'Goal FOREMAN recovery capability 不匹配',
+  );
+  assertForemanRecoveryIntentRecoveryBoundary(
+    root,
+    loaded,
+    options,
+    rootRecoveryId,
+    batch.intent,
+    batch.commit,
+  );
+  const targetTaskIds = [...batch.intent.target_task_ids];
+  const sourceTaskIds = [...batch.intent.source_task_ids];
+  const anchor = loaded.snapshot.tasks[options.taskId];
+  const currentForeman = anchor.sessions.FOREMAN;
+  return {
+    recovered: true,
+    idempotent: true,
+    cache_degraded: false,
+    event_id: rootRecoveryId,
+    event_sha256_by_task: {
+      ...batch.commit.event_sha256_by_task,
+    },
+    recovered_task_ids: targetTaskIds,
+    source_task_ids: sourceTaskIds,
+    task: publicTaskState(anchor),
+    tasks: Object.fromEntries(targetTaskIds.map((taskId) => [
+      taskId,
+      publicTaskState(loaded.snapshot.tasks[taskId]),
+    ])),
+    session: currentForeman
+      && currentForeman.thread_id === options.threadId
+      && currentForeman.attempt === Number(options.attempt)
+      ? publicSession(currentForeman)
+      : {
+        role: 'FOREMAN',
+        thread_id: options.threadId,
+        host_id: options.hostId || 'local',
+        attempt: Number(options.attempt),
+        status: 'superseded',
+      },
+    actor_capability_file: batch.intent.capability_file,
+    ledger: buildLedgerProjection(
+      loaded.paths,
+      loaded.manifest,
+      loaded.snapshot,
+      { readOnly: true },
+    ),
+  };
+}
+
 function exactUnsealedForemanRecoveryPreparedRequest(
   loaded,
   options,
@@ -10740,6 +13884,8 @@ function recoverExpiredForeman(cwd, options) {
   const root = controlRoot(cwd);
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
+  let recoveryBundleCapture = null;
+  let readOnlyRecoveryRetry = null;
   return withLock(root, () => {
     safeId(options.goalId, 'goal_id');
     assertControl(
@@ -10837,6 +13983,7 @@ function recoverExpiredForeman(cwd, options) {
     let capability;
     let acceptedAt;
     let probeObservation;
+    let roleIdentity;
     let intentRecord = batch.intent;
 
     const buildRequest = (
@@ -10845,6 +13992,7 @@ function recoverExpiredForeman(cwd, options) {
       sources,
       adoptionTarget,
       observation,
+      identity,
     ) => ({
       schema_version: 2,
       root_recovery_id: rootRecoveryId,
@@ -10864,6 +14012,7 @@ function recoverExpiredForeman(cwd, options) {
       reason,
       incident_ref: incidentRef,
       ...(observation ? { probe_observation: observation } : {}),
+      ...(identity ? { role_identity: identity } : {}),
     });
 
     const assertLegacyAnchorCas = (binding) => {
@@ -10935,8 +14084,10 @@ function recoverExpiredForeman(cwd, options) {
         sourceTaskIds,
         adoptionTargetTaskId,
         intentRecord.request.probe_observation || null,
+        intentRecord.request.role_identity || null,
       );
       probeObservation = intentRecord.request.probe_observation || null;
+      roleIdentity = intentRecord.request.role_identity || null;
       requestSha256 = hashObject(request);
       assertControl(
         expectedGoalScopeSha256 === originalScope.scope_sha256,
@@ -11128,6 +14279,10 @@ function recoverExpiredForeman(cwd, options) {
         'FOREMAN',
         options.threadId,
       );
+      assertRegistrationBundleCaptureCurrent(
+        loaded.paths,
+        recoveryBundleCapture,
+      );
       probeObservation = registrationProbeObservationBinding(
         loaded,
         anchorState,
@@ -11141,6 +14296,24 @@ function recoverExpiredForeman(cwd, options) {
           acceptanceTime: acceptedAt,
         },
         rootRecoveryId,
+        recoveryBundleCapture,
+      );
+      roleIdentity = registrationRoleIdentityBinding(
+        loaded,
+        anchorState,
+        {
+          ...options,
+          role: 'FOREMAN',
+          taskId: options.taskId,
+          threadId: options.threadId,
+          hostId,
+          attempt,
+          launchId: null,
+        },
+        rootRecoveryId,
+        null,
+        probeObservation,
+        recoveryBundleCapture,
       );
       request = buildRequest(
         originalScope,
@@ -11148,6 +14321,7 @@ function recoverExpiredForeman(cwd, options) {
         sourceTaskIds,
         adoptionTargetTaskId,
         probeObservation,
+        roleIdentity,
       );
       requestSha256 = hashObject(request);
       if (preparedProbe) {
@@ -11166,6 +14340,7 @@ function recoverExpiredForeman(cwd, options) {
           'pending.cap',
         ),
         sha256: '0'.repeat(64),
+        file_identity_sha256: '0'.repeat(64),
       };
       const previewEventIds = new Set();
       for (const taskId of targetTaskIds) {
@@ -11203,6 +14378,7 @@ function recoverExpiredForeman(cwd, options) {
           leaseMilliseconds,
           originalScope,
           probeObservation,
+          roleIdentity,
           reason,
           requestSha256,
           rootRecoveryId,
@@ -11254,6 +14430,10 @@ function recoverExpiredForeman(cwd, options) {
         'injected failure after FOREMAN recovery intent install',
       );
     }
+    capability.file_identity_sha256 = capabilityFileIdentitySha256(
+      capability.file,
+      'FOREMAN recovery successor capability',
+    );
 
     const anchorOriginalBinding = originalScope.tasks.find((task) => (
       task.task_id === options.taskId
@@ -11379,6 +14559,7 @@ function recoverExpiredForeman(cwd, options) {
           leaseMilliseconds,
           originalScope,
           probeObservation,
+          roleIdentity,
           reason,
           requestSha256,
           rootRecoveryId,
@@ -11390,6 +14571,11 @@ function recoverExpiredForeman(cwd, options) {
           threadId: options.threadId,
         });
         const validated = validateEvent(recoveryEvent);
+        assertRoleIdentityEventWriterClassified(
+          loaded.paths,
+          validated,
+          loaded.meta,
+        );
         validated.input_sha256 = hashObject(validated);
         validated.accepted_at = acceptedAt;
         const nextState = applyEvent(
@@ -11483,16 +14669,102 @@ function recoverExpiredForeman(cwd, options) {
       throw error;
     }
   }, {
-    transactionKey: () => foremanRecoveryTransactionKey(options),
+    transactionKey: () => {
+      recoveryBundleCapture =
+        captureRegistrationRoleIdentityBundle(root, options);
+      prevalidateFreshForemanRecoveryTransaction(
+        root,
+        options,
+        recoveryBundleCapture,
+      );
+      return foremanRecoveryTransactionKey(
+        options,
+        recoveryBundleCapture,
+      );
+    },
     sameStableOperationMismatchCode: 'PREPARED_REQUEST_MISMATCH',
     sameStableOperationMismatchMessage:
       `FOREMAN recovery ${safeId(
         options.eventId,
         'root recovery event_id',
       )} 不是 exact request retry`,
-    beforeGeneration: () => {
+    beforeGeneration: (transaction) => {
       oddRecoveryAuthorized = false;
       pristineOddRecoveryAuthorized = false;
+      readOnlyRecoveryRetry = null;
+      if (transaction.mode === 'FRESH') {
+        readOnlyRecoveryRetry =
+          completedForemanRecoveryRetryResult(root, options);
+        if (readOnlyRecoveryRetry !== null) return;
+        const recoveryPaths = goalPaths(
+          root,
+          safeId(options.goalId, 'goal_id'),
+        );
+        const existingRecovery = recoveryBatchState(
+          recoveryPaths,
+          options.goalId,
+          safeId(options.eventId, 'root recovery event_id'),
+        );
+        if (
+          !existingRecovery.intent
+            && options.probeObservationReceipt
+        ) {
+          const prevalidated = loadGoalStateUnlocked(
+            root,
+            options.goalId,
+            {
+              repairHeads: false,
+              repairBootstrapConsumption: false,
+            },
+          );
+          const prevalidatedState =
+            prevalidated.snapshot.tasks[options.taskId];
+          assertControl(
+            prevalidatedState,
+            'UNKNOWN_TASK',
+            `未知 task ${options.taskId}`,
+          );
+          assertRegistrationBundleCaptureCurrent(
+            prevalidated.paths,
+            recoveryBundleCapture,
+          );
+          const prevalidatedProbe =
+            registrationProbeObservationBinding(
+              prevalidated,
+              prevalidatedState,
+              {
+                ...options,
+                role: 'FOREMAN',
+                taskId: options.taskId,
+                threadId: options.threadId,
+                hostId: options.hostId,
+                attempt: options.attempt,
+                acceptanceTime:
+                  transaction.transaction_started_at,
+                persistEvidence: false,
+              },
+              options.eventId,
+              recoveryBundleCapture,
+            );
+          registrationRoleIdentityBinding(
+            prevalidated,
+            prevalidatedState,
+            {
+              ...options,
+              role: 'FOREMAN',
+              taskId: options.taskId,
+              threadId: options.threadId,
+              hostId: options.hostId,
+              attempt: options.attempt,
+              launchId: null,
+            },
+            options.eventId,
+            null,
+            prevalidatedProbe,
+            recoveryBundleCapture,
+          );
+        }
+      }
       oddRecoveryAuthorized = authorizeForemanRecoveryOddRecovery(
         root,
         options,
@@ -11507,6 +14779,14 @@ function recoverExpiredForeman(cwd, options) {
     },
     authorizeOddRecovery: () => oddRecoveryAuthorized,
     authorizePristineOddRecovery: () => pristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyRecoveryRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyRecoveryRetry,
+        }
+    ),
     afterGenerationBeforeCallback: generationBoundaryFaultHook(
       cwd,
       'GOAL_CONTROL_TEST_FAULT_AFTER_FOREMAN_RECOVERY_GENERATION',
@@ -11764,6 +15044,7 @@ function exactUnsealedRegistrationPreparedRequest(
   options,
   eventId,
   authorizationAt = null,
+  returnDetails = false,
 ) {
   const attempt = Number(options.attempt || 1);
   const hostId = options.hostId || 'local';
@@ -11926,6 +15207,14 @@ function exactUnsealedRegistrationPreparedRequest(
     },
     eventId,
   );
+  const roleIdentity = registrationRoleIdentityBinding(
+    loaded,
+    state,
+    options,
+    eventId,
+    workerBootstrap,
+    probeObservation,
+  );
   const request = {
     schema_version: 1,
     event_id: eventId,
@@ -11944,6 +15233,9 @@ function exactUnsealedRegistrationPreparedRequest(
     ...(probeObservation
       ? { probe_observation: probeObservation }
       : {}),
+    ...(roleIdentity
+      ? { role_identity: roleIdentity }
+      : {}),
     authorized_by: authorizedBy,
     expected: {
       state_revision: state.state_revision,
@@ -11956,7 +15248,16 @@ function exactUnsealedRegistrationPreparedRequest(
       full_head: state.full_head,
     },
   };
-  return hashObject({ request, authorizer_authority: authorizerAuthority });
+  const prepared = {
+    request,
+    authorizer_authority: authorizerAuthority,
+  };
+  return returnDetails
+    ? {
+      prepared,
+      shared_goal_foreman: sharedGoalForeman,
+    }
+    : hashObject(prepared);
 }
 
 function authorizeRegistrationOddRecovery(root, options) {
@@ -12156,6 +15457,8 @@ function registerRole(cwd, options) {
   let oddRecoveryAuthorized = false;
   let pristineOddRecoveryAuthorized = false;
   let pristineAuthorizationAt = null;
+  let registrationBundleCapture = null;
+  let readOnlyRegistrationRetry = null;
   return withLock(root, () => {
     safeId(options.goalId, 'goal_id');
     const attempt = Number(options.attempt || 1);
@@ -12201,6 +15504,13 @@ function registerRole(cwd, options) {
     const state = loaded.snapshot.tasks[options.taskId];
     assertControl(state, 'UNKNOWN_TASK', `未知 task ${options.taskId}`);
     assertControl(
+      !probeObservationProtocolRequired(loaded.manifest)
+        || Number(loaded.meta.role_identity_protocol_version || 1) < 2
+        || registrationBundleCapture,
+      'ROLE_IDENTITY_INTENT_REQUIRED',
+      'v2 registration transaction 缺 descriptor-bound atomic bundle capture',
+    );
+    assertControl(
       goalControlEventOccurrences(loaded, eventId).length === 0,
       'EVENT_ID_CONFLICT',
       `registration event id ${eventId} 已被 Goal control event 使用`,
@@ -12214,6 +15524,11 @@ function registerRole(cwd, options) {
     const existing = state.sessions[options.role];
     if (eventIdOccurrences.length === 1) {
       const accepted = acceptedGoalEvent(root, loaded, options.taskId, eventId);
+      assertAcceptedRegistrationRetryIdentityAuthority(
+        loaded,
+        accepted,
+        registrationBundleCapture,
+      );
       const retriedSession = authorizeRegistrationRetry(
         root,
         loaded,
@@ -12294,6 +15609,21 @@ function registerRole(cwd, options) {
             request.probe_observation || null,
             options,
           )
+          && (
+            !probeObservationProtocolRequired(loaded.manifest)
+              || (
+                request.role_identity
+                && readRoleIdentityIntent(
+                  loaded.paths,
+                  eventId,
+                )
+                && request.role_identity.intent_sha256
+                  === readRoleIdentityIntent(
+                    loaded.paths,
+                    eventId,
+                  ).intent_sha256
+              )
+          )
           && pendingRegistrationIntent.request_sha256 === hashObject(request),
         'EVENT_ID_CONFLICT',
         `registration intent ${eventId} 已绑定不同请求`,
@@ -12350,6 +15680,10 @@ function registerRole(cwd, options) {
         pendingRegistrationIntent.capability_file,
         pendingRegistrationIntent.capability_file,
       );
+      capability.file_identity_sha256 = capabilityFileIdentitySha256(
+        capability.file,
+        `registration ${eventId} actor capability`,
+      );
       assertControl(
         hashesEqual(
           capability.sha256,
@@ -12393,12 +15727,26 @@ function registerRole(cwd, options) {
           ...(request.probe_observation
             ? { probe_observation: request.probe_observation }
             : {}),
+          ...(request.role_identity
+            ? { role_identity: request.role_identity }
+            : {}),
           capability_sha256: capability.sha256,
           capability_file: capability.file,
+          capability_file_identity_sha256:
+            capability.file_identity_sha256,
           authorized_by: request.authorized_by,
         },
       };
+      assertRegistrationBundleCaptureCurrent(
+        loaded.paths,
+        registrationBundleCapture,
+      );
       const validated = validateEvent(registration);
+      assertRoleIdentityEventWriterClassified(
+        loaded.paths,
+        validated,
+        loaded.meta,
+      );
       validated.input_sha256 = hashObject(validated);
       validated.accepted_at = pendingRegistrationIntent.accepted_at;
       const nextState = applyEvent(state, validated, loaded.control.epoch);
@@ -12451,6 +15799,16 @@ function registerRole(cwd, options) {
         acceptanceTime: registrationAcceptedAt,
       },
       eventId,
+      registrationBundleCapture,
+    );
+    const roleIdentity = registrationRoleIdentityBinding(
+      loaded,
+      state,
+      options,
+      eventId,
+      workerBootstrap,
+      probeObservation,
+      registrationBundleCapture,
     );
     const existingIsCurrent = existing
       && existing.registered_control_epoch === loaded.control.epoch
@@ -12633,6 +15991,9 @@ function registerRole(cwd, options) {
       ...(probeObservation
         ? { probe_observation: probeObservation }
         : {}),
+      ...(roleIdentity
+        ? { role_identity: roleIdentity }
+        : {}),
       authorized_by: authorizedBy,
       expected: {
         state_revision: state.state_revision,
@@ -12707,8 +16068,16 @@ function registerRole(cwd, options) {
               registrationRequest.probe_observation,
           }
           : {}),
+        ...(registrationRequest.role_identity
+          ? {
+            role_identity:
+              registrationRequest.role_identity,
+          }
+          : {}),
         capability_sha256: actorCapability.sha256,
         capability_file: actorCapability.file,
+        capability_file_identity_sha256:
+          actorCapability.file_identity_sha256,
         authorized_by: authorizedBy,
         ...(sharedGoalForeman
           ? {
@@ -12726,6 +16095,8 @@ function registerRole(cwd, options) {
       ? {
         file: sharedGoalForeman.capability_file,
         sha256: sharedGoalForeman.capability_sha256,
+        file_identity_sha256:
+          sharedGoalForeman.capability_file_identity_sha256,
       }
       : {
         file: path.join(
@@ -12734,6 +16105,7 @@ function registerRole(cwd, options) {
           'pending.cap',
         ),
         sha256: '0'.repeat(64),
+        file_identity_sha256: `sha256:${'0'.repeat(64)}`,
       };
     const previewRegistration = validateEvent(
       buildRegistrationEvent(previewCapability),
@@ -12745,6 +16117,8 @@ function registerRole(cwd, options) {
       capability = {
         file: sharedGoalForeman.capability_file,
         sha256: sharedGoalForeman.capability_sha256,
+        file_identity_sha256:
+          sharedGoalForeman.capability_file_identity_sha256,
       };
     } else {
       const published = publishRegistrationIntent(
@@ -12779,12 +16153,27 @@ function registerRole(cwd, options) {
         'injected failure after registration intent install',
       );
     }
+    if (!capability.file_identity_sha256) {
+      capability.file_identity_sha256 = capabilityFileIdentitySha256(
+        capability.file,
+        `registration ${eventId} actor capability`,
+      );
+    }
     const capabilityMinted = !sharedGoalForeman;
     const registration = buildRegistrationEvent(capability);
     let durableCommit = null;
     let validated = null;
     try {
+      assertRegistrationBundleCaptureCurrent(
+        loaded.paths,
+        registrationBundleCapture,
+      );
       validated = validateEvent(registration);
+      assertRoleIdentityEventWriterClassified(
+        loaded.paths,
+        validated,
+        loaded.meta,
+      );
       const inputHash = hashObject(validated);
       validated.input_sha256 = inputHash;
       validated.accepted_at = registrationAcceptedAt;
@@ -12821,7 +16210,14 @@ function registerRole(cwd, options) {
       throw error;
     }
   }, {
-    transactionKey: () => registrationTransactionKey(options),
+    transactionKey: () => {
+      registrationBundleCapture =
+        captureRegistrationRoleIdentityBundle(root, options);
+      return registrationTransactionKey(
+        options,
+        registrationBundleCapture,
+      );
+    },
     sameStableOperationMismatchCode: 'PREPARED_REQUEST_MISMATCH',
     sameStableOperationMismatchMessage:
       'registration stable operation 已绑定不同 prepared request',
@@ -12829,6 +16225,7 @@ function registerRole(cwd, options) {
       oddRecoveryAuthorized = false;
       pristineOddRecoveryAuthorized = false;
       pristineAuthorizationAt = null;
+      readOnlyRegistrationRetry = null;
       if (transaction.mode === 'FRESH') {
         const prevalidated = loadGoalStateUnlocked(
           root,
@@ -12845,11 +16242,85 @@ function registerRole(cwd, options) {
           'UNKNOWN_TASK',
           `未知 task ${options.taskId}`,
         );
-        registrationWorkerBootstrapBinding(
+        const stableRegistrationEventId =
+          registrationStableEventId(options);
+        const acceptedRegistration = acceptedGoalEvent(
+          root,
+          prevalidated,
+          options.taskId,
+          stableRegistrationEventId,
+        );
+        if (acceptedRegistration) {
+          assertAcceptedRegistrationRetryIdentityAuthority(
+            prevalidated,
+            acceptedRegistration,
+            registrationBundleCapture,
+          );
+          const retriedSession = authorizeRegistrationRetry(
+            root,
+            prevalidated,
+            prevalidatedState,
+            options,
+            acceptedRegistration,
+          );
+          readOnlyRegistrationRetry = {
+            registered: true,
+            idempotent: true,
+            cache_degraded: false,
+            task: publicTaskState(prevalidatedState),
+            session: publicSession(retriedSession),
+            actor_capability_file: retriedSession.capability_file,
+            ...(retriedSession.task_nonce
+              ? { task_nonce: retriedSession.task_nonce }
+              : {}),
+            ledger: buildLedgerProjection(
+              prevalidated.paths,
+              prevalidated.manifest,
+              prevalidated.snapshot,
+            ),
+          };
+          return;
+        }
+        assertControl(
+          !probeObservationProtocolRequired(prevalidated.manifest)
+            || probeObservationOptions(options) !== null,
+          'CANARY_OBSERVATION_REQUIRED',
+          'manifest 启用 probe observation receipts 后，registration 必须携带 sealed PASS receipt',
+        );
+        const prevalidatedWorkerBootstrap =
+          registrationWorkerBootstrapBinding(
           prevalidated,
           prevalidatedState,
           options,
-        );
+          );
+        const prevalidatedProbeObservation =
+          registrationProbeObservationBinding(
+            prevalidated,
+            prevalidatedState,
+            {
+              ...options,
+              acceptanceTime: transaction.transaction_started_at,
+              persistEvidence: false,
+            },
+            stableRegistrationEventId,
+            registrationBundleCapture,
+          );
+        if (
+          goalEventIdOccurrences(
+            prevalidated,
+            stableRegistrationEventId,
+          ).length === 0
+        ) {
+          registrationRoleIdentityBinding(
+            prevalidated,
+            prevalidatedState,
+            options,
+            stableRegistrationEventId,
+            prevalidatedWorkerBootstrap,
+            prevalidatedProbeObservation,
+            registrationBundleCapture,
+          );
+        }
       }
       oddRecoveryAuthorized = authorizeRegistrationOddRecovery(root, options);
       if (
@@ -12875,6 +16346,14 @@ function registerRole(cwd, options) {
     },
     authorizeOddRecovery: () => oddRecoveryAuthorized,
     authorizePristineOddRecovery: () => pristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyRegistrationRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyRegistrationRetry,
+        }
+    ),
     afterGenerationBeforeCallback: generationBoundaryFaultHook(
       cwd,
       'GOAL_CONTROL_TEST_FAULT_AFTER_REGISTRATION_GENERATION',
@@ -12912,6 +16391,10 @@ function refreshProbeObservation(cwd, options) {
     'probe observation refresh 必须携带完整 fresh receipt request',
   );
   const requestSha256 = hashObject(request);
+  let readOnlyRefreshRetry = null;
+  let refreshOddRecoveryAuthorized = false;
+  let refreshPristineOddRecoveryAuthorized = false;
+  let refreshAcceptanceAt = null;
   return withLock(root, () => {
     const loaded = loadGoalStateUnlocked(root, request.goal_id);
     assertControl(
@@ -13014,20 +16497,12 @@ function refreshProbeObservation(cwd, options) {
       'CANARY_OBSERVATION_REFRESH_CAS_MISMATCH',
       'probe observation refresh old binding CAS 漂移',
     );
-    const acceptedAt = nowIso();
+    const acceptedAt = refreshAcceptanceAt || nowIso();
     assertRequiredLiveProbeObservationBinding(
       loaded.manifest,
       session,
       'probe observation refresh previous binding',
       Date.parse(acceptedAt),
-      {
-        repositoryHead: git(
-          options.invocationCwd || cwd,
-          ['rev-parse', 'HEAD'],
-        ),
-        role: request.role,
-        taskId: request.task_id,
-      },
     );
     const refreshed = registrationProbeObservationBinding(
       loaded,
@@ -13043,6 +16518,24 @@ function refreshProbeObservation(cwd, options) {
         acceptanceTime: acceptedAt,
       },
       request.event_id,
+    );
+    const refreshedRoleIdentity = registrationRoleIdentityBinding(
+      loaded,
+      state,
+      {
+        ...options,
+        goalId: request.goal_id,
+        taskId: request.task_id,
+        role: request.role,
+        threadId: request.thread_id,
+        hostId: request.host_id,
+        attempt: request.attempt,
+        launchId: session.launch_id,
+        roleIdentityConsumer: 'PROBE_OBSERVATION_REFRESHED',
+      },
+      request.event_id,
+      session.worker_bootstrap || null,
+      refreshed,
     );
     assertControl(
       refreshed.binding_sha256 !== request.expected_binding_sha256
@@ -13080,9 +16573,15 @@ function refreshProbeObservation(cwd, options) {
         attempt: request.attempt,
         previous_binding_sha256: request.expected_binding_sha256,
         probe_observation: refreshed,
+        role_identity: refreshedRoleIdentity,
         request_sha256: requestSha256,
       },
     });
+    assertRoleIdentityEventWriterClassified(
+      loaded.paths,
+      event,
+      loaded.meta,
+    );
     event.input_sha256 = hashObject(event);
     event.accepted_at = acceptedAt;
     const nextState = applyEvent(state, event, loaded.control.epoch);
@@ -13128,6 +16627,170 @@ function refreshProbeObservation(cwd, options) {
     sameStableOperationMismatchCode: 'EVENT_ID_CONFLICT',
     sameStableOperationMismatchMessage:
       'probe observation refresh stable event 已绑定不同 request',
+    beforeGeneration: (transaction) => {
+      readOnlyRefreshRetry = null;
+      refreshOddRecoveryAuthorized = false;
+      refreshPristineOddRecoveryAuthorized = false;
+      refreshAcceptanceAt = transaction.transaction_started_at;
+      const prevalidated = isOddTransactionRetry(transaction.mode)
+        ? loadOddRecoveryGoalState(root, request.goal_id)
+        : loadGoalStateUnlocked(
+          root,
+          request.goal_id,
+          {
+            repairHeads: false,
+            repairBootstrapConsumption: false,
+          },
+        );
+      const acceptedRefresh = acceptedGoalEvent(
+        root,
+        prevalidated,
+        request.task_id,
+        request.event_id,
+      );
+      if (acceptedRefresh) {
+        assertControl(
+          acceptedRefresh.type === 'PROBE_OBSERVATION_REFRESHED'
+            && acceptedRefresh.payload.request_sha256
+              === requestSha256
+            && exactRoleIdentityConsumer(
+              roleIdentityOperationReservation(
+                prevalidated.paths,
+                request.event_id,
+              ),
+              acceptedRefresh,
+              prevalidated.meta,
+            ),
+          'EVENT_ID_CONFLICT',
+          'accepted probe observation refresh 与 exact CURRENT_SESSION bundle/request 不匹配',
+        );
+        authorizeAcceptedEventRetry(
+          prevalidated,
+          request.task_id,
+          acceptedRefresh,
+          options.actorCapabilityFile,
+        );
+        const current = prevalidated.snapshot.tasks[request.task_id]
+          .sessions[request.role];
+        assertControl(
+          current
+            && current.probe_observation
+            && current.probe_observation.binding_sha256
+              === acceptedRefresh.payload.probe_observation.binding_sha256,
+          'CORRUPT_STORE',
+          'accepted refresh 与 current session binding 漂移',
+        );
+        if (transaction.mode === 'FRESH') {
+          readOnlyRefreshRetry = {
+            refreshed: true,
+            idempotent: true,
+            event_id: request.event_id,
+            session: publicSession(current),
+          };
+        } else if (isOddTransactionRetry(transaction.mode)) {
+          refreshOddRecoveryAuthorized = true;
+        }
+        return;
+      }
+      const state = prevalidated.snapshot.tasks[request.task_id];
+      assertControl(state, 'UNKNOWN_TASK', `未知 task ${request.task_id}`);
+      assertControl(
+        request.expected_state_revision === state.state_revision,
+        'STALE_STATE_REVISION',
+        'probe observation refresh state revision CAS 漂移',
+      );
+      const session = authorizeSession(
+        state,
+        options.actorCapabilityFile,
+        {
+          role: request.role,
+          threadId: request.thread_id,
+        },
+      );
+      assertControl(
+        session.host_id === request.host_id
+          && session.attempt === request.attempt
+          && session.probe_observation
+          && session.probe_observation.binding_sha256
+            === request.expected_binding_sha256,
+        'CANARY_OBSERVATION_REFRESH_CAS_MISMATCH',
+        'probe observation refresh actor/old binding CAS 漂移',
+      );
+      assertRequiredLiveProbeObservationBinding(
+        prevalidated.manifest,
+        session,
+        'probe observation refresh previous binding',
+        Date.parse(transaction.transaction_started_at),
+      );
+      const probeObservation = registrationProbeObservationBinding(
+        prevalidated,
+        state,
+        {
+          ...options,
+          goalId: request.goal_id,
+          taskId: request.task_id,
+          role: request.role,
+          threadId: request.thread_id,
+          hostId: request.host_id,
+          attempt: request.attempt,
+          acceptanceTime: transaction.transaction_started_at,
+          persistEvidence: false,
+        },
+        request.event_id,
+      );
+      const roleIdentity = registrationRoleIdentityBinding(
+        prevalidated,
+        state,
+        {
+          ...options,
+          goalId: request.goal_id,
+          taskId: request.task_id,
+          role: request.role,
+          threadId: request.thread_id,
+          hostId: request.host_id,
+          attempt: request.attempt,
+          launchId: session.launch_id,
+          roleIdentityConsumer: 'PROBE_OBSERVATION_REFRESHED',
+        },
+        request.event_id,
+        session.worker_bootstrap || null,
+        probeObservation,
+      );
+      assertRoleIdentityEventWriterClassified(
+        prevalidated.paths,
+        {
+          event_id: request.event_id,
+          goal_id: request.goal_id,
+          task_id: request.task_id,
+          type: 'PROBE_OBSERVATION_REFRESHED',
+          payload: {
+            role: request.role,
+            attempt: request.attempt,
+            probe_observation: probeObservation,
+            role_identity: roleIdentity,
+          },
+        },
+        prevalidated.meta,
+      );
+      if (isOddTransactionRetry(transaction.mode)) {
+        refreshPristineOddRecoveryAuthorized = true;
+      }
+    },
+    authorizeOddRecovery: () => refreshOddRecoveryAuthorized,
+    authorizePristineOddRecovery: () =>
+      refreshPristineOddRecoveryAuthorized,
+    readOnlyResultBeforeGeneration: () => (
+      readOnlyRefreshRetry === null
+        ? null
+        : {
+          completed: true,
+          value: readOnlyRefreshRetry,
+        }
+    ),
+    afterGenerationBeforeCallback: generationBoundaryFaultHook(
+      cwd,
+      'GOAL_CONTROL_TEST_FAULT_AFTER_PROBE_OBSERVATION_REFRESH_GENERATION',
+    ),
   });
 }
 
@@ -13245,6 +16908,7 @@ function advanceControlEpoch(cwd, options) {
     assertControl(Number.isSafeInteger(expectedEpoch) && expectedEpoch >= 0, 'INVALID_ARGUMENT', 'expected-epoch 必须是非负整数');
     const eventId = options.eventId;
     safeId(eventId, 'control event_id');
+    assertRoleIdentityOperationAvailable(loaded.paths, eventId);
     assertControl(
       goalMergeTargetReservations(root, options.goalId, eventId).length === 0,
       'EVENT_ID_RESERVED',
@@ -13362,6 +17026,13 @@ function advanceControlEpoch(cwd, options) {
       oddRecoveryAuthorized = false;
       pristineOddRecoveryAuthorized = false;
       pristineAuthorizationAt = null;
+      assertRoleIdentityOperationAvailable(
+        goalPaths(
+          root,
+          safeId(options.goalId, 'goal_id'),
+        ),
+        safeId(options.eventId, 'control event_id'),
+      );
       oddRecoveryAuthorized = authorizeGoalControlOddRecovery(
         root,
         options,
@@ -13532,7 +17203,7 @@ function nextTasks(cwd, goalId) {
         if (!pendingOperations.has(key)) pendingOperations.set(key, operation);
       }
     }
-    return {
+    return publicProjection({
       goal_id: goalId,
       ...(loaded.meta.goal_input_head
         ? {
@@ -13545,7 +17216,7 @@ function nextTasks(cwd, goalId) {
       batch,
       eligible: eligibleRows,
       tasks: rows,
-    };
+    });
   }, { allowIncompleteRecoveryRead: true });
 }
 
@@ -13987,7 +17658,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
     const actualHead = git(worktree, ['rev-parse', 'HEAD']);
     if (launchScope !== 'FULL') {
       assertControl(role === 'DEV' && session.recovered_from, 'RECOVERY_SCOPE_VIOLATION', `${role} scope=${launchScope}`);
-      return {
+      return publicProjection({
         role,
         goal_id: goalId,
         task_id: taskId,
@@ -14010,7 +17681,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
         allowed_actions: actions,
         maintenance_actions: maintenanceActions,
         forbidden: '源码修改/测试/commit/push/Preview/login/TIM/UI/environment/resource use/DEV_READY；等待 CAPTAIN 完成 isolated handoff 与 fresh preflight promotion',
-      };
+      });
     }
     if (session.launch_id) {
       launchFile = path.join(loaded.paths.dir, 'launches', taskId, `${session.launch_id}.json`);
@@ -14023,7 +17694,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           state,
           session,
         );
-        return {
+        return publicProjection({
           role,
           goal_id: goalId,
           task_id: taskId,
@@ -14054,7 +17725,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           allowed_actions: actions,
           maintenance_actions: maintenanceActions,
           forbidden: 'worker verdict/业务推进/旧 launch 或旧端口复用；先用 successor launch ID + fresh web/proxy port 执行 launch-template 与 preflight，hold 仅由 FOREMAN 另行解除',
-        };
+        });
       }
       assertControl(fs.existsSync(launchFile), 'LAUNCH_NOT_VALIDATED', `active session launch ${session.launch_id} 尚未通过 preflight`);
       launch = validateLaunchManifest(readJson(launchFile, `launch ${session.launch_id}`));
@@ -14115,7 +17786,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
       assertControl(actualHead === state.full_head, 'STALE_HEAD', `worktree HEAD ${actualHead} 与控制面 ${state.full_head} 不一致`);
     }
     const protocols = Object.fromEntries(Object.entries(loaded.manifest.protocol || {}).map(([key, value]) => [key, `${value.path}@${value.sha256}`]));
-    return {
+    return publicProjection({
       role,
       goal_id: goalId,
       task_id: taskId,
@@ -14141,7 +17812,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           : role === 'CAPTAIN'
             ? '业务代码/审 diff/产品裁决/merge'
             : '代替其它角色推进状态',
-    };
+    });
   });
 }
 
@@ -14183,7 +17854,12 @@ function actionsForTask(cwd, goalId, taskId, role = null, threadId = null) {
       },
     );
     const actions = projection.actions.filter((action) => !role || action.actor_role.split('|').includes(role));
-    return {
+    const identityIntent = pendingRoleIdentityIntent(
+      controlRoot(cwd),
+      loaded,
+      taskId,
+    );
+    return publicProjection({
       goal_id: goalId,
       task_id: taskId,
       state_revision: state.state_revision,
@@ -14205,11 +17881,14 @@ function actionsForTask(cwd, goalId, taskId, role = null, threadId = null) {
         ? sessionOperationalScope(state, role)
         : null,
       pending_operations: projection.pending_operations || [],
+      ...(identityIntent
+        ? { role_identity_intent: identityIntent }
+        : {}),
       actions,
       maintenance_actions: projection.maintenance_actions.filter(
         (action) => !role || action.actor_role === role,
       ),
-    };
+    });
   });
 }
 
@@ -14271,5 +17950,6 @@ module.exports = {
   retryAcceptedCommandEvent,
   resumeCapsule,
   taskActionProjection,
+  validateRoleIdentityBundle,
   validateRoleLaunchBoundary,
 };

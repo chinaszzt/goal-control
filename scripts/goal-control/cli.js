@@ -83,19 +83,78 @@ const {
   canaryBootstrapPlan,
   canaryBootstrapPrepare,
 } = require('./canary-bootstrap');
+const {
+  assertNoSensitiveStringLeaves,
+  containsSensitiveStringLeaves,
+} = require('./canary-observation-receipt');
+
+const ROLE_IDENTITY_COMMANDS = new Set([
+  'prepare-probe-observation-challenge',
+  'recover-expired-foreman',
+  'refresh-probe-observation',
+  'register-role',
+]);
+const ROLE_IDENTITY_CAPABILITY_OPTIONS = new Set([
+  '--actor-capability-file',
+  '--authorizer-capability-file',
+  '--bootstrap-capability-file',
+  '--foreman-recovery-capability-file',
+  '--issuer-capability-file',
+]);
+
+function assertNoSensitiveRoleIdentityArguments(argv) {
+  if (!ROLE_IDENTITY_COMMANDS.has(argv[0])) return;
+  const eventIdIndex = argv.indexOf('--event-id');
+  const eventId = eventIdIndex >= 0
+    ? argv[eventIdIndex + 1]
+    : null;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (
+      index > 0
+        && ROLE_IDENTITY_CAPABILITY_OPTIONS.has(argv[index - 1])
+    ) {
+      continue;
+    }
+    if (
+      index > 0
+        && argv[index - 1] === '--probe-observation-stable-id'
+        && typeof eventId === 'string'
+        && token === `canary-observation-${eventId}`
+    ) {
+      // The event ID is scanned independently in this same argv pass.
+      // Exempt only its exact protocol-derived stable ID serialization.
+      continue;
+    }
+    try {
+      assertNoSensitiveStringLeaves(token);
+    } catch (error) {
+      if (
+        error
+          && error.code === 'CANARY_OBSERVATION_SENSITIVE_DATA'
+      ) {
+        throw new ControlError(
+          error.code,
+          `role identity argv index=${index} length=${typeof token === 'string' ? token.length : -1} 含敏感数据`,
+        );
+      }
+      throw error;
+    }
+  }
+}
 
 function readEvent(file) {
   if (file !== '-') return readJson(file, 'event file');
   const body = fs.readFileSync(0, 'utf8');
   try {
     return JSON.parse(body);
-  } catch (error) {
-    throw new ControlError('INVALID_JSON', `stdin event 不是合法 JSON: ${error.message}`);
+  } catch {
+    throw new ControlError('INVALID_JSON', 'stdin event 不是合法 JSON');
   }
 }
 
 function validateRole(role) {
-  assertControl(ROLES.includes(role), 'INVALID_ROLE', `未知 role: ${role}`);
+  assertControl(ROLES.includes(role), 'INVALID_ROLE', '未知 role');
   return role;
 }
 
@@ -134,6 +193,7 @@ function goalCommand(
   cwd = process.cwd(),
   invocationCwd = cwd,
 ) {
+  assertNoSensitiveRoleIdentityArguments(argv);
   const args = parseArgs(argv);
   const command = args._[0];
   if (args.help || command === 'help') {
@@ -156,18 +216,73 @@ function goalCommand(
     return { value: initializeGoal(cwd, requireArg(args, 'manifest')), exitCode: 0 };
   }
   if (command === 'prepare-probe-observation-challenge') {
+    const allowed = new Set([
+      '_',
+      'json',
+      'goal',
+      'task',
+      'role',
+      'event_id',
+      'canary_plan_sha256',
+      'issuer_capability_file',
+      'identity_receipt',
+      'identity_receipt_sha256',
+      'worker_bootstrap_receipt',
+      'worker_bootstrap_receipt_sha256',
+      'worker_bootstrap_operation_id',
+      'worker_bootstrap_challenge',
+      'worker_bootstrap_identity_plan_sha256',
+      'worker_worktree',
+    ]);
+    const unknown = Object.keys(args).filter((key) => !allowed.has(key));
+    assertControl(
+      args._.length === 1 && unknown.length === 0,
+      'INVALID_ARGUMENT',
+      'prepare-probe-observation-challenge 拒绝 caller identity/未知参数',
+    );
     return {
       value: prepareProbeObservationChallenge(cwd, {
         goalId: requireArg(args, 'goal'),
         taskId: requireArg(args, 'task'),
         role: validateRole(requireArg(args, 'role')),
-        threadId: requireArg(args, 'thread'),
-        hostId: args.host || 'local',
-        attempt: optionalInteger(args.attempt, 'attempt', 1),
         eventId: requireArg(args, 'event_id'),
         planSha256: requireArg(args, 'canary_plan_sha256'),
         issuerCapabilityFile:
           requireArg(args, 'issuer_capability_file'),
+        identityReceipt: requireArg(
+          args,
+          'identity_receipt',
+        ),
+        identityReceiptSha256: requireArg(
+          args,
+          'identity_receipt_sha256',
+        ),
+        workerBootstrapReceipt:
+          args.worker_bootstrap_receipt === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_receipt'),
+        workerBootstrapReceiptSha256:
+          args.worker_bootstrap_receipt_sha256 === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_receipt_sha256'),
+        workerBootstrapOperationId:
+          args.worker_bootstrap_operation_id === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_operation_id'),
+        workerBootstrapChallenge:
+          args.worker_bootstrap_challenge === undefined
+            ? null
+            : requireArg(args, 'worker_bootstrap_challenge'),
+        workerBootstrapIdentityPlanSha256:
+          args.worker_bootstrap_identity_plan_sha256 === undefined
+            ? null
+            : requireArg(
+              args,
+              'worker_bootstrap_identity_plan_sha256',
+            ),
+        workerWorktree: args.worker_worktree === undefined
+          ? null
+          : requireArg(args, 'worker_worktree'),
       }),
       exitCode: 0,
     };
@@ -632,9 +747,20 @@ function goalCommand(
     return { value: nextTasks(cwd, requireArg(args, 'goal')), exitCode: 0 };
   }
   if (command === 'actions') {
-    const role = validateRole(requireArg(args, 'role'));
+    const role = args.role ? validateRole(args.role) : null;
+    assertControl(
+      role || !args.thread,
+      'INVALID_ARGUMENT',
+      'credentialless actions 不能单独指定 --thread',
+    );
     return {
-      value: actionsForTask(cwd, requireArg(args, 'goal'), requireArg(args, 'task'), role, requireArg(args, 'thread')),
+      value: actionsForTask(
+        cwd,
+        requireArg(args, 'goal'),
+        requireArg(args, 'task'),
+        role,
+        role ? requireArg(args, 'thread') : null,
+      ),
       exitCode: 0,
     };
   }
@@ -1534,6 +1660,7 @@ function controlErrorCauseCodes(error) {
 
 function runMain(kind, argv) {
   try {
+    assertNoSensitiveRoleIdentityArguments(argv);
     const args = parseArgs(argv);
     const invocationCwd = fs.realpathSync(process.cwd());
     let cwd = invocationCwd;
@@ -1557,9 +1684,19 @@ function runMain(kind, argv) {
       : resourceCommand(argv, cwd);
     printResult(result, argv);
   } catch (error) {
-    const failure = error instanceof ControlError ? error : new ControlError('UNEXPECTED', error.message);
-    process.stderr.write(`${kind}ctl[${failure.code}]: ${failure.message}\n`);
-    if (failure.details) process.stderr.write(`${JSON.stringify(failure.details)}\n`);
+    const failure = error instanceof ControlError
+      ? error
+      : new ControlError('UNEXPECTED', '内部错误');
+    const publicMessage = containsSensitiveStringLeaves(failure.message)
+      ? '请求包含敏感数据，已拒绝'
+      : failure.message;
+    process.stderr.write(`${kind}ctl[${failure.code}]: ${publicMessage}\n`);
+    if (
+      failure.details
+        && !containsSensitiveStringLeaves(failure.details)
+    ) {
+      process.stderr.write(`${JSON.stringify(failure.details)}\n`);
+    }
     const causeCodes = controlErrorCauseCodes(failure);
     if (causeCodes.length > 0) {
       process.stderr.write(`${JSON.stringify({ caused_by_codes: causeCodes })}\n`);

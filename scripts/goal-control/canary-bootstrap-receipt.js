@@ -7,6 +7,7 @@ const {
 } = require('./canary-bootstrap-identity-plan');
 const {
   parsePrivateJson,
+  parsePrivateJsonBytes,
 } = require('./canary-bootstrap-artifacts');
 const { assertControl } = require('./errors');
 const {
@@ -304,10 +305,15 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
   );
   safeId(options.workerThread, '--worker-thread');
   safeId(options.workerHost, '--worker-host');
-  const record = parsePrivateJson(
-    options.receiptFile,
-    'worker canary bootstrap receipt',
-  );
+  const record = options.receiptCapture
+    ? parsePrivateJsonBytes(
+      options.receiptCapture.bytes,
+      'worker canary bootstrap receipt',
+    )
+    : parsePrivateJson(
+      options.receiptFile,
+      'worker canary bootstrap receipt',
+    );
   assertControl(
     record.sha256 === normalizeHash(
       options.expectedReceiptSha256,
@@ -353,10 +359,15 @@ function validateWorkerBootstrapReceipt(options, dependencies) {
     path.dirname(options.receiptFile),
     'intent.json',
   );
-  const intent = parsePrivateJson(
-    intentFile,
-    'worker canary bootstrap intent',
-  );
+  const intent = options.intentCapture
+    ? parsePrivateJsonBytes(
+      options.intentCapture.bytes,
+      'worker canary bootstrap intent',
+    )
+    : parsePrivateJson(
+      intentFile,
+      'worker canary bootstrap intent',
+    );
   const {
     request_sha256: intentRequestSha256,
     ...intentUnsigned

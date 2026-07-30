@@ -87,6 +87,7 @@ const GOAL_COMMANDS = Object.freeze([
   ['canary-bootstrap-inspect ...', '从 worker 实际 process cwd 只读回报 thread/host/worktree identity'],
   ['canary-bootstrap-prepare ...', '以 durable intent/CAS 绑定 actual linked worktree branch 并 seal receipt'],
   ['canary-plan --repository-worktree <frozen-goal-worktree> --manifest <json> --role <role> [--task <id>] [--browser-canary-receipt <absolute-json>]', '用当前 absolute controller binary 对 frozen Goal worktree 与受控 localhost server receipt 机械计算当前角色的最小 canary probe'],
+  ['prepare-probe-observation-challenge ...', '验证预先存在的 host-signed actual role identity observation，并在同一 locked upstream transaction 原子发布 durable identity intent/challenge'],
   ['init --manifest <json>', '从已提交的 manifest/packet 初始化 Goal'],
   ['adopt-store-protocol ...', '审计迁移现存非空 v1 control root 到当前 decoder/lock protocol'],
   ['rotate-store-protocol ...', '在 exact predecessor seal 与双 decoder 重放验证后轮换已 seal control root'],
@@ -95,7 +96,7 @@ const GOAL_COMMANDS = Object.freeze([
   ['recover-expired-foreman ...', '原子批量替换过期死锁中的 Goal-wide FOREMAN projections'],
   ['status --goal <id>', '读取机器状态投影'],
   ['next --goal <id>', '计算当前可并行启动的 task 批次'],
-  ['actions --goal <id> --task <id> --role <role> --thread <id>', '读取该角色当前合法动作'],
+  ['actions --goal <id> --task <id> [--role <role> --thread <id>]', 'credentialless 读取 task 合法动作/identity intent；指定 exact role+thread 时追加当前 actor scope'],
   ['resume --goal <id> --task <id> --role <role> --thread <id>', '生成 compact/successor 恢复 capsule'],
   ['event-template ...', '生成绑定当前 CAS/epoch/packet/HEAD 的事件，不提交'],
   ['event --goal <id> --file <json>', '验证并接受一个结构化事件'],
@@ -262,9 +263,9 @@ const GOAL_HELP = Object.freeze({
     safety: '这是持久化写命令：成功时追加 accepted event 并推进控制状态；响应丢失只能以同一 event ID、逐字相同 envelope 与原 capability 精确重试。',
   },
   'prepare-probe-observation-challenge': {
-    usage: 'goalctl prepare-probe-observation-challenge --goal <id> --task <id> --role <role> --thread <id> [--host <id>] [--attempt <n>] --event-id <registration-or-recovery-id> --canary-plan-sha256 <sha256> --issuer-capability-file <bootstrap|recovery|live-authorizer-capability> [--json]',
-    summary: '在 host adapter 执行 replay/probes 前，由 controller durable issuer 生成一次性 challenge，并精确绑定 plan、event、Goal/task/role 与 thread/host/attempt。',
-    safety: '同一 event/request exact retry 返回同一 challenge；异文冲突。测试 namespace 只有隔离临时 repository/control root 才能签发，production challenge 只绑定 HOST_ADAPTER。',
+    usage: 'goalctl prepare-probe-observation-challenge --goal <id> --task <id> --role <role> --event-id <registration-or-recovery-id> --canary-plan-sha256 <sha256> --issuer-capability-file <bootstrap|recovery|live-authorizer-capability> --identity-receipt <absolute-0600-host-signed-json> --identity-receipt-sha256 <sha256> [--worker-bootstrap-receipt <absolute-json> --worker-bootstrap-receipt-sha256 <sha256> --worker-bootstrap-operation-id <launch-id> --worker-bootstrap-challenge <64hex> --worker-bootstrap-identity-plan-sha256 <sha256> --worker-worktree <absolute-worktree>] [--json]',
+    summary: '在同一 locked upstream canary acceptance transaction 内，descriptor-bound 验证预先存在的 host/platform-signed actual identity；worker 同时重验 exact controller bootstrap receipt/worktree/HEAD。随后从 current lineage 派生 attempt/revision/HEAD，并用一个 schema-v2 atomic bundle 发布 sanitized durable intent+challenge。',
+    safety: 'thread/host/attempt 不接受 argv；worker observation.launch_id 必须等于 controller bootstrap operation ID。每个 goal/task/role/attempt/lifecycle/launch semantic slot 只接受 original operation，另一 operation 在 generation 前整树零写拒绝。exact retry 重验同一 observation inode/bytes 和 issuer file identity；status/actions 之后纯只读，不存在 consumer seal 写。',
   },
   'register-role': {
     usage: 'goalctl register-role --goal <id> --task <id> --role <role> --thread <id> [--host <id>] [--attempt <n>] [--lease-ms <ms>] [--status active|idle] [--launch-id <id>] [--event-id <stable-id>] [--bootstrap-capability-file <file>|--foreman-recovery-capability-file <file>|--authorizer-capability-file <file>|--actor-capability-file <existing-actor-file>] [--authorizer-thread <id>] [--worker-bootstrap-receipt <absolute-json> --worker-bootstrap-receipt-sha256 <sha256> --worker-bootstrap-operation-id <id> --worker-bootstrap-challenge <64hex> --worker-bootstrap-identity-plan-sha256 <sha256>] [--probe-observation-receipt <0600-json> --probe-observation-receipt-sha256 <sha256> --probe-observation-plan <0600-json> --probe-observation-plan-sha256 <sha256> --probe-observation-stable-id <id> --probe-observation-challenge <64hex>] [--json]',
@@ -292,9 +293,9 @@ const GOAL_HELP = Object.freeze({
     safety: '任一 Goal-wide pending registration/root recovery 会冻结整个 batch；task pending operation 令该 task eligible=false。只按 pending_operations.retry 做 exact retry；一般 stable_id_unavailable 时取调用前持久化的原 ID，不得拿 hash 冒充或跳到其它 task；SOURCE_CHECKPOINT 按 retry.command 重放原 snapshot/receipt/DEV capability，不把 request hash 当 CLI ID。',
   },
   actions: {
-    usage: 'goalctl actions [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> --role <role> --thread <id> [--json]',
-    summary: 'zero-write 返回登记角色当前 actions、maintenance_actions、pending_operations、task launch_scope 与该 role session 的 operational_scope。',
-    safety: 'pending_operations 非空时 actions 与 maintenance_actions 均为空，只能完成列出的 exact retry；launch_scope 是当前 launch/action gate，operational_scope 是 session 的 RECOVERY_BLOCKED/PREFLIGHT_ONLY/FULL authority。',
+    usage: 'goalctl actions [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> [--role <role> --thread <id>] [--json]',
+    summary: 'zero-write credentialless 返回 task 合法 actions、maintenance_actions、pending_operations、launch_scope 与可用的 role_identity_intent；可选 exact role+thread 时追加已登记 actor session 的 operational_scope。',
+    safety: 'credentialless 与指定 actor 两种读取都不写 generation/control tree；--role 与 --thread 必须成对提供。pending_operations 非空时 actions 与 maintenance_actions 均为空，只能完成列出的 exact retry；role_identity_intent 只投影 controller-owned authority，launch_scope 是当前 launch/action gate，operational_scope 是 session 的 RECOVERY_BLOCKED/PREFLIGHT_ONLY/FULL authority。',
   },
   resume: {
     usage: 'goalctl resume [--repository-worktree <frozen-goal-worktree>] --goal <id> --task <id> --role <role> --thread <id> [--json]',

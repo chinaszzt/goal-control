@@ -33,6 +33,10 @@ const ABANDON_RECEIPT_KIND = 'P1_COMMIT_REF_ABANDONMENT';
 const BUNDLE_FILE = 'commit.bundle';
 const UNAVAILABLE_CARRIER_FILE = 'carrier-unavailable.json';
 const UNAVAILABLE_CARRIER_KIND = 'P1_COMMIT_CARRIER_UNAVAILABLE';
+const P1_COMMIT_RECEIPT_MISSING_INTENT_MESSAGE =
+  'P1 commit receipt 缺 retained intent';
+const ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE =
+  'accepted P1 transaction 缺 retained intent/bundle';
 const INTENT_FILE = 'intent.json';
 const ABANDON_HANDOFF_FILE = 'abandon-handoff.json';
 const ABANDON_HANDOFF_KIND = 'P1_COMMIT_ABANDON_HANDOFF';
@@ -4101,14 +4105,14 @@ function listP1CommitOperations(root, goalId, taskId) {
     assertControl(
       commitIntentIds.has(eventId),
       'CORRUPT_STORE',
-      `P1 commit receipt ${eventId} 缺 retained intent`,
+      P1_COMMIT_RECEIPT_MISSING_INTENT_MESSAGE,
     );
   }
   for (const eventId of acceptedP1Transactions.keys()) {
     assertControl(
       commitIntentIds.has(eventId),
       'CORRUPT_STORE',
-      `accepted P1 transaction ${eventId} 缺 retained intent/bundle`,
+      ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
     );
   }
   if (fs.existsSync(paths.abandonments)) {
@@ -4357,8 +4361,10 @@ function abandonmentReceiptsForTask(root, goalId, taskId) {
 }
 
 module.exports = {
+  ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
   ABANDON_RECEIPT_KIND,
   INTENT_KIND,
+  P1_COMMIT_RECEIPT_MISSING_INTENT_MESSAGE,
   abandonmentReceiptsForTask,
   abandonP1CommitRef,
   acceptedP1Event,

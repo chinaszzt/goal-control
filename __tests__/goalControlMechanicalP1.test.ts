@@ -3,10 +3,12 @@ import { createHash } from "crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -110,6 +112,39 @@ function git(cwd: string, ...args: string[]): string {
 
 function sha256(body: string | Buffer): string {
   return `sha256:${createHash("sha256").update(body).digest("hex")}`;
+}
+
+function controlTreeFingerprint(root: string): Array<[string, string]> {
+  const fingerprint: Array<[string, string]> = [];
+  if (!existsSync(root)) return fingerprint;
+  const visit = (directory: string, relativeDirectory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const entry = path.join(directory, name);
+      const relative = relativeDirectory
+        ? `${relativeDirectory}/${name}`
+        : name;
+      const stat = lstatSync(entry);
+      const mode = (stat.mode & 0o7777).toString(8);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        fingerprint.push([relative, `directory:${mode}`]);
+        visit(entry, relative);
+      } else if (stat.isSymbolicLink()) {
+        fingerprint.push([
+          relative,
+          `symlink:${mode}:${readlinkSync(entry)}`,
+        ]);
+      } else if (stat.isFile()) {
+        fingerprint.push([
+          relative,
+          `file:${mode}:${readFileSync(entry).toString("base64")}`,
+        ]);
+      } else {
+        fingerprint.push([relative, `other:${mode}`]);
+      }
+    }
+  };
+  visit(root, "");
+  return fingerprint;
 }
 
 function writeJson(file: string, value: unknown): void {
@@ -2185,6 +2220,11 @@ describe("mechanically scoped fresh-Goal P1", () => {
           `${String(committed.event_id)}.json`,
         ));
       }
+      const rawCapabilityBytes = [
+        fixture.capabilities.FOREMAN,
+        fixture.capabilities.CAPTAIN,
+      ].map((file) => readFileSync(file as string, "utf8").trim());
+      const beforeRead = controlTreeFingerprint(fixture.controlDir);
       const status = run(fixture, [
         "status",
         "--goal",
@@ -2194,8 +2234,18 @@ describe("mechanically scoped fresh-Goal P1", () => {
         "--json",
       ]);
       expect(status.code).toBe(2);
-      expect(status.stderr).toContain("CORRUPT_STORE");
-      expect(status.stderr).toContain("retained intent");
+      expect(status.stdout).toBe("");
+      expect(status.stderr).toBe(
+        deleteReceipt
+          ? "goalctl[CORRUPT_STORE]: accepted P1 transaction 缺 retained intent/bundle\n"
+          : "goalctl[CORRUPT_STORE]: P1 commit receipt 缺 retained intent\n",
+      );
+      expect(String(committed.event_id)).toHaveLength(43);
+      expect(status.stderr).not.toContain(String(committed.event_id));
+      for (const secret of rawCapabilityBytes) {
+        expect(status.stderr).not.toContain(secret);
+      }
+      expect(controlTreeFingerprint(fixture.controlDir)).toEqual(beforeRead);
     },
   );
 
