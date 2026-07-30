@@ -17214,7 +17214,7 @@ function nextTasks(cwd, goalId) {
         if (!pendingOperations.has(key)) pendingOperations.set(key, operation);
       }
     }
-    return {
+    return publicProjection({
       goal_id: goalId,
       ...(loaded.meta.goal_input_head
         ? {
@@ -17227,7 +17227,7 @@ function nextTasks(cwd, goalId) {
       batch,
       eligible: eligibleRows,
       tasks: rows,
-    };
+    });
   }, { allowIncompleteRecoveryRead: true });
 }
 
@@ -17669,7 +17669,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
     const actualHead = git(worktree, ['rev-parse', 'HEAD']);
     if (launchScope !== 'FULL') {
       assertControl(role === 'DEV' && session.recovered_from, 'RECOVERY_SCOPE_VIOLATION', `${role} scope=${launchScope}`);
-      return {
+      return publicProjection({
         role,
         goal_id: goalId,
         task_id: taskId,
@@ -17692,7 +17692,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
         allowed_actions: actions,
         maintenance_actions: maintenanceActions,
         forbidden: '源码修改/测试/commit/push/Preview/login/TIM/UI/environment/resource use/DEV_READY；等待 CAPTAIN 完成 isolated handoff 与 fresh preflight promotion',
-      };
+      });
     }
     if (session.launch_id) {
       launchFile = path.join(loaded.paths.dir, 'launches', taskId, `${session.launch_id}.json`);
@@ -17705,7 +17705,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           state,
           session,
         );
-        return {
+        return publicProjection({
           role,
           goal_id: goalId,
           task_id: taskId,
@@ -17736,7 +17736,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           allowed_actions: actions,
           maintenance_actions: maintenanceActions,
           forbidden: 'worker verdict/业务推进/旧 launch 或旧端口复用；先用 successor launch ID + fresh web/proxy port 执行 launch-template 与 preflight，hold 仅由 FOREMAN 另行解除',
-        };
+        });
       }
       assertControl(fs.existsSync(launchFile), 'LAUNCH_NOT_VALIDATED', `active session launch ${session.launch_id} 尚未通过 preflight`);
       launch = validateLaunchManifest(readJson(launchFile, `launch ${session.launch_id}`));
@@ -17797,7 +17797,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
       assertControl(actualHead === state.full_head, 'STALE_HEAD', `worktree HEAD ${actualHead} 与控制面 ${state.full_head} 不一致`);
     }
     const protocols = Object.fromEntries(Object.entries(loaded.manifest.protocol || {}).map(([key, value]) => [key, `${value.path}@${value.sha256}`]));
-    return {
+    return publicProjection({
       role,
       goal_id: goalId,
       task_id: taskId,
@@ -17823,7 +17823,7 @@ function resumeCapsule(cwd, goalId, taskId, role, threadId) {
           : role === 'CAPTAIN'
             ? '业务代码/审 diff/产品裁决/merge'
             : '代替其它角色推进状态',
-    };
+    });
   });
 }
 
@@ -17870,7 +17870,7 @@ function actionsForTask(cwd, goalId, taskId, role = null, threadId = null) {
       loaded,
       taskId,
     );
-    return {
+    return publicProjection({
       goal_id: goalId,
       task_id: taskId,
       state_revision: state.state_revision,
@@ -17899,7 +17899,7 @@ function actionsForTask(cwd, goalId, taskId, role = null, threadId = null) {
       maintenance_actions: projection.maintenance_actions.filter(
         (action) => !role || action.actor_role === role,
       ),
-    };
+    });
   });
 }
 

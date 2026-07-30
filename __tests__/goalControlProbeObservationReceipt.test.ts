@@ -7330,6 +7330,34 @@ describe("sealed probe observation receipt", () => {
           repository.manifest.base_head,
       },
     );
+    const recoveryBundleDirectory = loadGoalStateReadOnly(
+      repository.root,
+      "goal-receipt-integration",
+      (loaded) => loaded.paths.roleIdentityIntents,
+    );
+    const recoveryBundleFile = readdirSync(recoveryBundleDirectory)
+      .map((name) => path.join(recoveryBundleDirectory, name))
+      .find((file) => {
+        if (!file.endsWith(".role-identity-bundle.json")) return false;
+        return JSON.parse(readFileSync(file, "utf8")).operation_id
+          === recoveryOperationId;
+      });
+    expect(recoveryBundleFile).toBeDefined();
+    const recoveryBundle = JSON.parse(readFileSync(
+      String(recoveryBundleFile),
+      "utf8",
+    ));
+    const recoveryCapabilityIdentity =
+      recoveryBundle.intent.issuer_authority
+        .capability_file_identity_sha256;
+    const sourceCapabilityIdentity =
+      recoveryBundle.intent.issuer_authority
+        .source_capability_file_identity_sha256;
+    expect(recoveryCapabilityIdentity)
+      .toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(sourceCapabilityIdentity)
+      .toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(sourceCapabilityIdentity).not.toBe(recoveryCapabilityIdentity);
     const beforeSkippedAdoption = ordinaryFileSnapshot(
       repository.controlDir,
     );
@@ -7376,6 +7404,7 @@ describe("sealed probe observation receipt", () => {
       idempotent: false,
       recovered_task_ids: ["TASK-B"],
       source_task_ids: ["TASK-A"],
+      actor_capability_file: expect.any(String),
       session: {
         role: "FOREMAN",
         thread_id: recoveryPrepared.identity.thread_id,
@@ -7390,13 +7419,23 @@ describe("sealed probe observation receipt", () => {
     const beforeAdoptionRetry = ordinaryFileSnapshot(
       repository.controlDir,
     );
-    expect(goalCommand(
+    const adoptedRetry = goalCommand(
       exactRecoveryArgs,
       repository.root,
-    ).value).toMatchObject({
+    ).value;
+    expect(adoptedRetry).toMatchObject({
       recovered: true,
       idempotent: true,
+      actor_capability_file: adopted.actor_capability_file,
     });
+    const recoveryCapabilityBytes = readFileSync(
+      adopted.actor_capability_file,
+      "utf8",
+    ).toString().trim();
+    expect(JSON.stringify(adopted)).not.toContain(recoveryCapabilityBytes);
+    expect(JSON.stringify(adoptedRetry)).not.toContain(
+      recoveryCapabilityBytes,
+    );
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeAdoptionRetry);
     const recoveredLoaded = loadGoalStateReadOnly(
@@ -7449,25 +7488,96 @@ describe("sealed probe observation receipt", () => {
     const beforeAdoptionReads = ordinaryFileSnapshot(
       repository.controlDir,
     );
-    expect(goalCommand([
+    const publicAdoptionStatus = goalCommand([
       "status",
       "--goal", "goal-receipt-integration",
       "--json",
-    ], repository.root).value.tasks["TASK-B"].sessions.FOREMAN)
+    ], repository.root).value;
+    expect(publicAdoptionStatus.tasks["TASK-B"].sessions.FOREMAN)
       .toMatchObject({
         attempt: 2,
         role_identity: {
           operation_id: recoveryOperationId,
         },
       });
-    expect(goalCommand([
+    const publicAdoptionActions = goalCommand([
       "actions",
       "--goal", "goal-receipt-integration",
       "--task", "TASK-B",
       "--role", "FOREMAN",
       "--thread", recoveryPrepared.identity.thread_id,
       "--json",
-    ], repository.root).value.task_id).toBe("TASK-B");
+    ], repository.root).value;
+    const publicAdoptionNext = goalCommand([
+      "next",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ], repository.root).value;
+    const publicAdoptionResume = goalCommand([
+      "resume",
+      "--goal", "goal-receipt-integration",
+      "--task", "TASK-B",
+      "--role", "FOREMAN",
+      "--thread", recoveryPrepared.identity.thread_id,
+      "--json",
+    ], repository.root).value;
+    const publicAdoptionRebuild = goalCommand([
+      "rebuild-ledger",
+      "--goal", "goal-receipt-integration",
+      "--json",
+    ], repository.root).value;
+    expect(publicAdoptionActions).toMatchObject({
+      goal_id: "goal-receipt-integration",
+      task_id: "TASK-B",
+      state_revision: expect.any(Number),
+      actions: expect.any(Array),
+      maintenance_actions: expect.any(Array),
+    });
+    expect(publicAdoptionNext).toMatchObject({
+      goal_id: "goal-receipt-integration",
+      tasks: expect.arrayContaining([
+        expect.objectContaining({ task_id: "TASK-B" }),
+      ]),
+    });
+    expect(publicAdoptionResume).toMatchObject({
+      role: "FOREMAN",
+      goal_id: "goal-receipt-integration",
+      task_id: "TASK-B",
+      allowed_actions: expect.any(Array),
+      maintenance_actions: expect.any(Array),
+    });
+    expect(publicAdoptionRebuild).toMatchObject({
+      goal_id: "goal-receipt-integration",
+      tasks: {
+        "TASK-B": {
+          sessions: {
+            FOREMAN: {
+              role_identity: {
+                operation_id: recoveryOperationId,
+              },
+            },
+          },
+        },
+      },
+    });
+    for (const publicValue of [
+      publicAdoptionStatus,
+      publicAdoptionActions,
+      publicAdoptionNext,
+      publicAdoptionResume,
+      publicAdoptionRebuild,
+    ]) {
+      const serialized = JSON.stringify(publicValue);
+      expect(serialized).not.toContain(
+        "capability_file_identity_sha256",
+      );
+      expect(serialized).not.toContain(
+        "source_capability_file_identity_sha256",
+      );
+      expect(serialized).not.toContain(recoveryCapabilityIdentity);
+      expect(serialized).not.toContain(sourceCapabilityIdentity);
+      expect(serialized).not.toContain(recoveryCapabilityBytes);
+    }
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeAdoptionReads);
     const registrationProbe = structuredClone(

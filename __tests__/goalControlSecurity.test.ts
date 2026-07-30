@@ -2523,8 +2523,61 @@ describe("goal control trusted evidence registry", () => {
         expect(result.stdout).not.toContain(privateValue);
       }
     }
-    expect(publicReads[0].stdout).toContain(THREADS.DEV);
+    const [
+      publicStatus,
+      publicNext,
+      publicRebuild,
+      publicActions,
+      publicResume,
+    ] = publicReads.map((result) => JSON.parse(result.stdout));
+    expect(publicStatus.tasks["TASK-A"]).toMatchObject({
+      phase: "DEV_READY",
+      sessions: {
+        FOREMAN: { role: "FOREMAN", thread_id: THREADS.FOREMAN },
+        CAPTAIN: { role: "CAPTAIN", thread_id: THREADS.CAPTAIN },
+        DEV: { role: "DEV", thread_id: THREADS.DEV },
+      },
+    });
     expect(publicReads[0].stdout).toContain(ids.fast);
+    expect(publicNext).toMatchObject({
+      goal_id: "demo",
+      control_epoch: expect.any(Number),
+      pending_operations: expect.any(Array),
+      batch: expect.any(Array),
+      eligible: expect.any(Array),
+      tasks: expect.arrayContaining([
+        expect.objectContaining({
+          task_id: "TASK-A",
+          next_actions: expect.any(Array),
+          maintenance_actions: expect.any(Array),
+        }),
+      ]),
+    });
+    expect(publicRebuild).toMatchObject({
+      goal_id: "demo",
+      tasks: { "TASK-A": { phase: "DEV_READY" } },
+    });
+    expect(publicActions).toMatchObject({
+      goal_id: "demo",
+      task_id: "TASK-A",
+      state_revision: expect.any(Number),
+      control_epoch: expect.any(Number),
+      pending_operations: expect.any(Array),
+      actions: expect.any(Array),
+      maintenance_actions: expect.any(Array),
+    });
+    expect(publicResume).toMatchObject({
+      role: "CAPTAIN",
+      goal_id: "demo",
+      task_id: "TASK-A",
+      state_revision: expect.any(Number),
+      control_epoch: expect.any(Number),
+      phase: "DEV_READY",
+      protocols: expect.any(Object),
+      allowed_actions: expect.any(Array),
+      maintenance_actions: expect.any(Array),
+      forbidden: expect.any(String),
+    });
   });
 
   it("allows only benign HEARTBEAT revisions between evidence acceptance and DEV_READY", () => {
