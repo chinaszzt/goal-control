@@ -32,6 +32,7 @@ const PRISTINE_RECOVERY_CALLSITES = new Set([
   "scripts/goal-control/goal.js:recordGoalEventRejection",
   "scripts/goal-control/goal.js:recoverExpiredForeman",
   "scripts/goal-control/goal.js:rebuildLedger",
+  "scripts/goal-control/goal.js:refreshProbeObservation",
   "scripts/goal-control/goal.js:registerRole",
   "scripts/goal-control/preflight.js:abortPristinePreflightIngress",
   "scripts/goal-control/resources.js:acquireLeaseOnce",

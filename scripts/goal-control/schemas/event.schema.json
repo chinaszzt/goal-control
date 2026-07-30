@@ -663,17 +663,24 @@
         "properties": {
           "type": { "const": "RECOVER_EXPIRED_FOREMAN" },
           "payload": {
-            "properties": {
-              "role_identity": {
+            "anyOf": [
+              {
                 "properties": {
-                  "protocol": {
-                    "const": "goalctl-role-identity-intent-v2"
+                  "role_identity": {
+                    "properties": {
+                      "protocol": {
+                        "const": "goalctl-role-identity-intent-v2"
+                      }
+                    },
+                    "required": ["protocol"]
                   }
                 },
-                "required": ["protocol"]
+                "required": ["role_identity"]
+              },
+              {
+                "required": ["capability_file_identity_sha256"]
               }
-            },
-            "required": ["role_identity"]
+            ]
           }
         },
         "required": ["type", "payload"]
@@ -681,7 +688,19 @@
       "then": {
         "properties": {
           "payload": {
-            "required": ["capability_file_identity_sha256"]
+            "required": [
+              "capability_file_identity_sha256",
+              "probe_observation",
+              "role_identity",
+              "root_recovery_id",
+              "goal_scope",
+              "goal_scope_sha256",
+              "scope_task_ids",
+              "source_task_ids",
+              "adoption_target_task_id",
+              "adopt_without_local_foreman",
+              "source_foreman"
+            ]
           }
         }
       }

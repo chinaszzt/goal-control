@@ -1686,6 +1686,38 @@ function sanitizedChallengeIssuerAuthority(loaded, state, authority) {
   };
 }
 
+function assertIssuerPrefixChronology(
+  root,
+  manifest,
+  authority,
+  transactionStartedAt,
+) {
+  if (authority.kind === 'BOOTSTRAP') return;
+  const transactionAt = Date.parse(transactionStartedAt);
+  const events = acceptedEventFiles(
+    root,
+    manifest.goal_id,
+    authority.source_task_id,
+  ).map((file) => readJson(
+    file,
+    `role identity issuer prefix ${path.basename(file)}`,
+  ));
+  const prefix = events.slice(0, authority.source_state_revision);
+  const head = prefix[prefix.length - 1] || null;
+  assertControl(
+    Number.isFinite(transactionAt)
+      && Number.isSafeInteger(authority.source_state_revision)
+      && authority.source_state_revision > 0
+      && prefix.length === authority.source_state_revision
+      && head
+      && head.event_sha256 === authority.source_event_head_sha256
+      && Number.isFinite(Date.parse(head.accepted_at))
+      && Date.parse(head.accepted_at) <= transactionAt,
+    'ROLE_IDENTITY_ISSUER_CHRONOLOGY_INVALID',
+    'role identity issuer accepted-event prefix 晚于 controller transaction boundary',
+  );
+}
+
 function prepareChallengeIdentity(root, options, transactionStartedAt) {
   const loaded = loadGoalStateUnlocked(root, options.goalId, {
     repairHeads: false,
@@ -1916,6 +1948,12 @@ function prepareChallengeIdentity(root, options, transactionStartedAt) {
     loaded,
     state,
     authority,
+  );
+  assertIssuerPrefixChronology(
+    root,
+    loaded.manifest,
+    issuerAuthority,
+    transactionStartedAt,
   );
   const semanticSlot = {
     schema_version: 1,
@@ -2689,6 +2727,56 @@ function captureRegistrationRoleIdentityBundle(root, options) {
   const entry = readRoleIdentityBundleEntryByOperation(paths, eventId);
   if (entry) return entry;
   return null;
+}
+
+function prevalidateFreshForemanRecoveryTransaction(
+  root,
+  options,
+  bundleEntry,
+) {
+  const goalId = safeId(options.goalId, 'goal_id');
+  const rootRecoveryId = safeId(
+    options.eventId,
+    'root recovery event_id',
+  );
+  const paths = goalPaths(root, goalId);
+  const batch = recoveryBatchState(paths, goalId, rootRecoveryId);
+  if (batch.intent || batch.commit) return;
+  assertControl(
+    bundleEntry
+      && bundleEntry.bundle
+      && bundleEntry.bundle.intent,
+    'ROLE_IDENTITY_INTENT_REQUIRED',
+    'Goal recovery 必须消费 exact upstream role identity bundle',
+  );
+  const intent = bundleEntry.bundle.intent;
+  assertControl(
+    intent.operation_id === rootRecoveryId
+      && intent.goal_id === goalId
+      && intent.task_id === options.taskId
+      && intent.role === 'FOREMAN'
+      && intent.thread_id === options.threadId
+      && intent.host_id === (options.hostId || 'local')
+      && intent.attempt === Number(options.attempt)
+      && intent.launch_id === null
+      && intent.issuer_authority.kind === 'GOAL_RECOVERY'
+      && intent.issuer_authority.recovery_scope_sha256
+        === normalizeHash(
+          options.expectedGoalScopeSha256,
+          'expected Goal FOREMAN recovery scope sha256',
+        ),
+    'ROLE_IDENTITY_INTENT_MISMATCH',
+    'Goal recovery request 与 exact upstream identity bundle 不匹配',
+  );
+  const loaded = loadGoalStateUnlocked(root, goalId, {
+    repairHeads: false,
+    repairBootstrapConsumption: false,
+  });
+  exactUnsealedForemanRecoveryPreparedRequest(
+    loaded,
+    options,
+    rootRecoveryId,
+  );
 }
 
 function assertRegistrationBundleCaptureCurrent(paths, capture) {
@@ -14444,6 +14532,11 @@ function recoverExpiredForeman(cwd, options) {
     transactionKey: () => {
       recoveryBundleCapture =
         captureRegistrationRoleIdentityBundle(root, options);
+      prevalidateFreshForemanRecoveryTransaction(
+        root,
+        options,
+        recoveryBundleCapture,
+      );
       return foremanRecoveryTransactionKey(
         options,
         recoveryBundleCapture,
@@ -16396,7 +16489,7 @@ function refreshProbeObservation(cwd, options) {
       refreshOddRecoveryAuthorized = false;
       refreshPristineOddRecoveryAuthorized = false;
       refreshAcceptanceAt = transaction.transaction_started_at;
-      const prevalidated = transaction.mode === 'ODD_RETRY'
+      const prevalidated = isOddTransactionRetry(transaction.mode)
         ? loadOddRecoveryGoalState(root, request.goal_id)
         : loadGoalStateUnlocked(
           root,
@@ -16451,7 +16544,7 @@ function refreshProbeObservation(cwd, options) {
             event_id: request.event_id,
             session: publicSession(current),
           };
-        } else if (transaction.mode === 'ODD_RETRY') {
+        } else if (isOddTransactionRetry(transaction.mode)) {
           refreshOddRecoveryAuthorized = true;
         }
         return;
@@ -16536,7 +16629,7 @@ function refreshProbeObservation(cwd, options) {
         },
         prevalidated.meta,
       );
-      if (transaction.mode === 'ODD_RETRY') {
+      if (isOddTransactionRetry(transaction.mode)) {
         refreshPristineOddRecoveryAuthorized = true;
       }
     },

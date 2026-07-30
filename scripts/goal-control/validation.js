@@ -1321,6 +1321,36 @@ function validateEvent(event) {
     );
   }
   if (event.type === 'RECOVER_EXPIRED_FOREMAN') {
+    const recoveryV2Candidate = (
+      payload.role_identity
+        && payload.role_identity.protocol
+          === 'goalctl-role-identity-intent-v2'
+    ) || Object.prototype.hasOwnProperty.call(
+      payload,
+      'capability_file_identity_sha256',
+    );
+    if (recoveryV2Candidate) {
+      const requiredRecoveryAuthorityFields = [
+        'capability_file_identity_sha256',
+        'probe_observation',
+        'role_identity',
+        'root_recovery_id',
+        'goal_scope',
+        'goal_scope_sha256',
+        'scope_task_ids',
+        'source_task_ids',
+        'adoption_target_task_id',
+        'adopt_without_local_foreman',
+        'source_foreman',
+      ];
+      assertControl(
+        requiredRecoveryAuthorityFields.every((field) => (
+          Object.prototype.hasOwnProperty.call(payload, field)
+        )),
+        'INVALID_EVENT',
+        'RECOVER_EXPIRED_FOREMAN v2 payload authority fields 不完整',
+      );
+    }
     assertControl(
       Number.isSafeInteger(payload.expected_foreman_attempt)
         && payload.expected_foreman_attempt > 0,
@@ -1433,7 +1463,8 @@ function validateEvent(event) {
         )
         : null;
       assertControl(
-        payload.role_identity.operation_id === rootRecoveryId
+        typeof payload.adopt_without_local_foreman === 'boolean'
+          && payload.role_identity.operation_id === rootRecoveryId
           && (
             event.event_id === rootRecoveryId
               || event.event_id === derivedChildId

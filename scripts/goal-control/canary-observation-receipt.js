@@ -379,9 +379,11 @@ function sensitiveStringFinding(value, options = {}) {
       ) {
         return;
       }
+      if (CRYPTOGRAPHIC_CAPABILITY_EXEMPT_FIELDS.has(field)) {
+        return;
+      }
       if (
-        !CRYPTOGRAPHIC_CAPABILITY_EXEMPT_FIELDS.has(field)
-          && CAPABILITY_VALUE_RE.test(current)
+        CAPABILITY_VALUE_RE.test(current)
       ) {
         finding = { category: 'capability', field };
       } else if (GITHUB_TOKEN_VALUE_RE.test(current)) {

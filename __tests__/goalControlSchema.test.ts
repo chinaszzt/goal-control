@@ -1331,6 +1331,133 @@ describe("goal-control machine contract schemas", () => {
         `/private/${embedded}`;
       parity(resealEventProbeObservation(embeddedPath), true);
     }
+
+    const recoveryIdentity = {
+      ...structuredClone(identityV2),
+      operation_id: "recover-foreman-schema-root-2",
+      attempt: 2,
+      registration_authorized_by_sha256: hashObject({
+        role: "GOAL_RECOVERY",
+        capability_file: "/private/recovery-capability",
+      }),
+    };
+    const sourceForeman = {
+      role: "FOREMAN",
+      thread_id: PLATFORM_THREAD,
+      host_id: PLATFORM_HOST,
+      attempt: 1,
+      status: "lost",
+      lease_until: "2026-07-29T01:02:04.005Z",
+      registration_event_id: "register-foreman-schema-source-1",
+      recovery_event_id: null,
+    };
+    const recoveryScopeCore = {
+      schema_version: 1,
+      goal_id: event.goal_id,
+      control_epoch: event.control_epoch,
+      control_event_head: null,
+      tasks: [{
+        task_id: event.task_id,
+        phase: "DEV_ACTIVE",
+        state_revision: event.expected_state_revision,
+        event_head: `sha256:${"d".repeat(64)}`,
+        control_epoch: event.control_epoch,
+        packet: structuredClone(event.packet),
+        base_head: event.base_head,
+        full_head: event.full_head,
+        foreman: sourceForeman,
+        captain: null,
+        recovery_sha256: null,
+        recovery_backlog_sha256: `sha256:${"e".repeat(64)}`,
+      }],
+    };
+    const recoveryScope = {
+      ...recoveryScopeCore,
+      scope_sha256: hashObject(recoveryScopeCore),
+      recoverable_task_ids: [event.task_id],
+      archived_source_task_ids: [],
+      adoption_candidate_task_ids: [],
+    };
+    const recoveryProbe = probeObservationFor(recoveryIdentity);
+    recoveryProbe.stable_id =
+      `canary-observation-${recoveryIdentity.operation_id}`;
+    delete recoveryProbe.binding_sha256;
+    recoveryProbe.binding_sha256 = hashObject(recoveryProbe);
+    recoveryIdentity.probe_observation_binding_sha256 =
+      recoveryProbe.binding_sha256;
+    const recoveryEvent = {
+      ...structuredClone(event),
+      event_id: recoveryIdentity.operation_id,
+      type: "RECOVER_EXPIRED_FOREMAN",
+      actor: {
+        role: "FOREMAN",
+        thread_id: recoveryIdentity.thread_id,
+        host_id: recoveryIdentity.host_id,
+      },
+      payload: {
+        attempt: 2,
+        lease_ms: 60_000,
+        status: "active",
+        capability_sha256: "c".repeat(64),
+        capability_file: "/private/recovery-successor-capability",
+        capability_file_identity_sha256:
+          `sha256:${"c".repeat(64)}`,
+        reason: "schema recovery parity",
+        incident_ref: "test://schema/recovery",
+        request_sha256: `sha256:${"d".repeat(64)}`,
+        probe_observation: recoveryProbe,
+        role_identity: recoveryIdentity,
+        root_recovery_id: recoveryIdentity.operation_id,
+        goal_scope: recoveryScope,
+        goal_scope_sha256: recoveryScope.scope_sha256,
+        scope_task_ids: [event.task_id],
+        source_task_ids: [event.task_id],
+        adoption_target_task_id: null,
+        adopt_without_local_foreman: false,
+        source_foreman: {
+          task_id: event.task_id,
+          ...sourceForeman,
+        },
+        expected_event_head: `sha256:${"d".repeat(64)}`,
+        expected_foreman_thread_id: sourceForeman.thread_id,
+        expected_foreman_host_id: sourceForeman.host_id,
+        expected_foreman_attempt: sourceForeman.attempt,
+        expected_foreman_lease_until: sourceForeman.lease_until,
+        authorized_by: { role: "GOAL_RECOVERY" },
+      },
+    };
+    parity(recoveryEvent, true);
+    for (const field of [
+      "capability_file_identity_sha256",
+      "probe_observation",
+      "role_identity",
+      "root_recovery_id",
+      "goal_scope",
+      "goal_scope_sha256",
+      "scope_task_ids",
+      "source_task_ids",
+      "adoption_target_task_id",
+      "adopt_without_local_foreman",
+      "source_foreman",
+    ]) {
+      const omitted = structuredClone(recoveryEvent);
+      delete omitted.payload[field];
+      expect(schemaEvent(omitted)).toBe(false);
+      if (runtimeEvent(omitted)) {
+        throw new Error(
+          `runtime accepted omitted v2 recovery field ${field}`,
+        );
+      }
+      const nullValue = structuredClone(recoveryEvent);
+      nullValue.payload[field] = null;
+      const nullAccepted = field === "adoption_target_task_id";
+      expect(schemaEvent(nullValue)).toBe(nullAccepted);
+      if (runtimeEvent(nullValue) !== nullAccepted) {
+        throw new Error(
+          `runtime/schema null boundary diverged for v2 recovery field ${field}`,
+        );
+      }
+    }
   });
 
   it("defines the canonical sealed probe observation receipt contract", () => {

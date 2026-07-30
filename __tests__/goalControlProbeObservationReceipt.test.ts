@@ -3625,7 +3625,7 @@ describe("sealed probe observation receipt", () => {
       "--identity-receipt-sha256", fileSha256(duplicateFile),
       "--json",
     ], current.repository.root)).toThrow(expect.objectContaining({
-      code: "CANARY_OBSERVATION_REPLAY_CONFLICT",
+      code: "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
     }));
     expect(ordinaryFileSnapshot(current.repository.controlDir))
       .toEqual(beforeDuplicate);
@@ -3891,6 +3891,23 @@ describe("sealed probe observation receipt", () => {
         .toBe(recoveryOperationId);
       expect(name.length).toBeGreaterThan(0);
     }
+    const beforeWrongAttempt = ordinaryFileSnapshot(
+      repository.controlDir,
+    );
+    expect(() => recoverPreparedForemanIdentity(
+      repository,
+      artifacts,
+      initialized,
+      recoveryPrepared,
+      {
+        taskId: "TASK-A",
+        attempt: 3,
+      },
+    )).toThrow(expect.objectContaining({
+      code: "ROLE_IDENTITY_INTENT_MISMATCH",
+    }));
+    expect(ordinaryFileSnapshot(repository.controlDir))
+      .toEqual(beforeWrongAttempt);
     const recovered = recoverPreparedForemanIdentity(
       repository,
       artifacts,
@@ -5501,6 +5518,103 @@ describe("sealed probe observation receipt", () => {
     }));
     expect(ordinaryFileSnapshot(repository.controlDir))
       .toEqual(beforeCapabilityBytesReplay);
+  });
+
+  test("rejects controller clock rollback before identity generation and accepts equal or forward prefix time", () => {
+    for (const [label, transactionOffset] of [
+      ["equal", 2_000],
+      ["forward", 3_000],
+    ] as const) {
+      const repository = integrationRepository();
+      process.env.GOAL_CONTROL_DIR = repository.controlDir;
+      process.env.GOAL_CONTROL_TEST_MODE = "1";
+      const initialized = goalCommand([
+        "init",
+        "--manifest", repository.manifestFile,
+        "--json",
+      ], repository.root).value;
+      const artifacts = realpathSync(mkdtempSync(
+        path.join(tmpdir(), `goal-role-identity-clock-${label}-`),
+      ));
+      roots.push(artifacts);
+      chmodSync(artifacts, 0o700);
+      const foreman = registerControlAuthority(
+        repository,
+        initialized,
+        artifacts,
+        "FOREMAN",
+        null,
+      );
+      const registeredAt = Date.parse(foreman.session.registered_at);
+      const heartbeatAt = new Date(registeredAt + 2_000).toISOString();
+      process.env.GOAL_CONTROL_NOW = heartbeatAt;
+      submitPublicGoalEvent(repository, artifacts, {
+        eventId: `issuer-clock-heartbeat-${label}`,
+        type: "HEARTBEAT",
+        actorRole: "FOREMAN",
+        actorCapabilityFile:
+          String(foreman.actor_capability_file),
+        payload: {
+          lease_ms: 600_000,
+          status: "active",
+        },
+      });
+      const rollbackAt = new Date(registeredAt + 1_000).toISOString();
+      process.env.GOAL_CONTROL_NOW = rollbackAt;
+      const beforeRollback = ordinaryFileSnapshot(
+        repository.controlDir,
+      );
+      expect(() => prepareRoleIdentityChallenge(
+        repository,
+        artifacts,
+        {
+          operationId: `issuer-clock-rollback-${label}`,
+          taskId: "TASK-A",
+          role: "CAPTAIN",
+          threadId: `actual-clock-rollback-${label}-thread`,
+          hostId: `actual-clock-rollback-${label}-host`,
+          sessionId: `actual-clock-rollback-${label}-session`,
+          launchId: null,
+          issuerCapabilityFile:
+            String(foreman.actor_capability_file),
+          observedAt: rollbackAt,
+        },
+      )).toThrow(expect.objectContaining({
+        code: "ROLE_IDENTITY_ISSUER_CHRONOLOGY_INVALID",
+      }));
+      expect(ordinaryFileSnapshot(repository.controlDir))
+        .toEqual(beforeRollback);
+      expect(goalCommand([
+        "status",
+        "--goal", "goal-receipt-integration",
+        "--json",
+      ], repository.root).value.goal_id)
+        .toBe("goal-receipt-integration");
+
+      const acceptedAt = new Date(
+        registeredAt + transactionOffset,
+      ).toISOString();
+      process.env.GOAL_CONTROL_NOW = acceptedAt;
+      expect(prepareRoleIdentityChallenge(
+        repository,
+        artifacts,
+        {
+          operationId: `issuer-clock-${label}`,
+          taskId: "TASK-A",
+          role: "CAPTAIN",
+          threadId: `actual-clock-${label}-thread`,
+          hostId: `actual-clock-${label}-host`,
+          sessionId: `actual-clock-${label}-session`,
+          launchId: null,
+          issuerCapabilityFile:
+            String(foreman.actor_capability_file),
+          observedAt: acceptedAt,
+        },
+      ).challenge).toMatchObject({
+        registration_event_id: `issuer-clock-${label}`,
+      });
+      delete process.env.GOAL_CONTROL_NOW;
+    }
   });
 
   test("rejects signed-observation binding, authentication, TTL, and replay variants with zero writes", () => {
