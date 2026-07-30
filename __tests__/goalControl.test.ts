@@ -736,6 +736,36 @@ function expectControlError(result: CliResult, code: string): void {
   expect(`${result.stdout}\n${result.stderr}`).toContain(code);
 }
 
+function expectExactCliControlErrorNoEcho(
+  result: CliResult,
+  code: string,
+  message: string,
+  forbiddenValues: string[],
+): void {
+  expect(message.trim()).not.toHaveLength(0);
+  expect(result).toEqual({
+    code: 2,
+    stdout: "",
+    stderr: `goalctl[${code}]: ${message}\n`,
+  });
+  const serialized = JSON.stringify(result);
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
+}
+
+function expectSerializedSurfaceNoEcho(
+  value: unknown,
+  forbiddenValues: string[],
+): void {
+  const serialized = JSON.stringify(value);
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
+}
+
 type RecoverForemanOverrides = {
   snapshot?: TaskStatus;
   taskId?: "TASK-A" | "TASK-B";
@@ -2089,6 +2119,18 @@ describe("scripts/goalctl.js", () => {
     );
     expect(firstRetry.code).toBe(0);
     const firstRetryBody = json(firstRetry);
+    const rawActorCapability = readFileSync(
+      String(firstRetryBody.actor_capability_file),
+      "utf8",
+    ).trim();
+    const rawCaptainCapability = readFileSync(
+      fixture.capabilities["TASK-A"].CAPTAIN as string,
+      "utf8",
+    ).trim();
+    expectSerializedSurfaceNoEcho(firstRetryBody, [
+      rawActorCapability,
+      rawCaptainCapability,
+    ]);
 
     apply(fixture, book, "ROLE_LOST", "CAPTAIN", {
       payload: {
@@ -2134,17 +2176,32 @@ describe("scripts/goalctl.js", () => {
     expect(body.task_nonce).toBe(firstRetryBody.task_nonce);
     expect(body.actor_capability_file).toBe(firstRetryBody.actor_capability_file);
     expect(existsSync(String(body.actor_capability_file))).toBe(true);
+    expectSerializedSurfaceNoEcho(body, [
+      rawActorCapability,
+      rawCaptainCapability,
+    ]);
     expect(ordinaryFileSnapshot(fixture.controlDir))
       .toEqual(beforeHistoricalRetry);
 
+    const variantLaunchId = "launch-dev-response-loss-variant";
     const variantLaunch = [...originalRegistration];
     variantLaunch[variantLaunch.indexOf("--launch-id") + 1] =
-      "launch-dev-response-loss-variant";
+      variantLaunchId;
     const beforeVariantLaunch =
       ordinaryFileSnapshot(fixture.controlDir);
-    expectControlError(
-      runCli(variantLaunch, fixture.root, fixture.controlDir),
+    expectExactCliControlErrorNoEcho(
+      runCli(
+        variantLaunch,
+        fixture.root,
+        fixture.controlDir,
+      ),
       "EVENT_ID_CONFLICT",
+      `registration event id ${eventId} 已被不同请求使用`,
+      [
+        rawActorCapability,
+        rawCaptainCapability,
+        variantLaunchId,
+      ],
     );
     expect(ordinaryFileSnapshot(fixture.controlDir))
       .toEqual(beforeVariantLaunch);
@@ -2157,8 +2214,12 @@ describe("scripts/goalctl.js", () => {
       fixture.root,
       "synthetic-v2-plan.json",
     );
-    writeFileSync(syntheticReceipt, "{}\n");
-    writeFileSync(syntheticPlan, "{}\n");
+    const syntheticReceiptBody =
+      "{\"rejected_sensitive_receipt\":\"ao01-receipt-secret-value\"}\n";
+    const syntheticPlanBody =
+      "{\"rejected_sensitive_plan\":\"ao01-plan-secret-value\"}\n";
+    writeFileSync(syntheticReceipt, syntheticReceiptBody);
+    writeFileSync(syntheticPlan, syntheticPlanBody);
     const syntheticReceiptSha = createHash("sha256")
       .update(readFileSync(syntheticReceipt))
       .digest("hex");
@@ -2177,9 +2238,24 @@ describe("scripts/goalctl.js", () => {
     ];
     const beforeMixedRetry =
       ordinaryFileSnapshot(fixture.controlDir);
-    expectControlError(
-      runCli(mixedRetry, fixture.root, fixture.controlDir),
+    expectExactCliControlErrorNoEcho(
+      runCli(
+        mixedRetry,
+        fixture.root,
+        fixture.controlDir,
+      ),
       "EVENT_ID_CONFLICT",
+      `registration event id ${eventId} 已被不同请求使用`,
+      [
+        rawActorCapability,
+        rawCaptainCapability,
+        syntheticReceiptBody.trim(),
+        syntheticPlanBody.trim(),
+        "ao01-receipt-secret-value",
+        "ao01-plan-secret-value",
+        "canary-observation-synthetic-legacy-retry",
+        "ab".repeat(32),
+      ],
     );
     expect(ordinaryFileSnapshot(fixture.controlDir))
       .toEqual(beforeMixedRetry);

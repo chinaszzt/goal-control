@@ -43,6 +43,18 @@ const { canonicalJson, hashObject } = nodeRequire(
   canonicalJson: (value: unknown) => string;
   hashObject: (value: unknown) => string;
 };
+const { ControlError } = nodeRequire(
+  path.join(ROOT, "scripts", "goal-control", "errors.js"),
+) as {
+  ControlError: new (
+    code: string,
+    message: string,
+    details?: unknown,
+  ) => Error & {
+    code: string;
+    details: unknown;
+  };
+};
 const { goalCommand } = nodeRequire(
   path.join(ROOT, "scripts", "goal-control", "cli.js"),
 ) as {
@@ -52,6 +64,54 @@ const { goalCommand } = nodeRequire(
     invocationCwd?: string,
   ) => { value: Record<string, any>; exitCode: number };
 };
+
+function expectExactControlErrorNoEcho(
+  callback: () => unknown,
+  code: string,
+  message: string,
+  forbiddenValues: string[],
+): void {
+  let caught: unknown = null;
+  try {
+    callback();
+  } catch (error: unknown) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ControlError);
+  const controlError = caught as {
+    name: string;
+    code: string;
+    message: string;
+    details: unknown;
+  };
+  expect(message.trim()).not.toHaveLength(0);
+  expect(controlError).toMatchObject({
+    name: "ControlError",
+    code,
+    message,
+  });
+  const serialized = JSON.stringify({
+    name: controlError.name,
+    code: controlError.code,
+    message: controlError.message,
+    details: controlError.details,
+  });
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
+}
+
+function expectSerializedSurfaceNoEcho(
+  value: unknown,
+  forbiddenValues: string[],
+): void {
+  const serialized = JSON.stringify(value);
+  for (const forbidden of forbiddenValues) {
+    expect(forbidden).not.toHaveLength(0);
+    expect(serialized).not.toContain(forbidden);
+  }
+}
 const {
   loadGoalStateReadOnly,
   recoveryIntentMatchesOptions,
@@ -6480,6 +6540,22 @@ describe("sealed probe observation receipt", () => {
     expect(attempt1BundleFile).toBeDefined();
     const exactBundleFile = String(attempt1BundleFile);
     const exactBundleBytes = readFileSync(exactBundleFile);
+    const exactBundleRecord = JSON.parse(
+      exactBundleBytes.toString("utf8"),
+    );
+    const rawAttempt1Capability = readFileSync(
+      String(registeredAttempt1.actor_capability_file),
+      "utf8",
+    ).trim();
+    const rawCaptainCapability = readFileSync(
+      String(positive.captain.actor_capability_file),
+      "utf8",
+    ).trim();
+    const signedObservationSignature = String(
+      exactBundleRecord.intent.identity_observation.signed_record
+        .attestation.signature_base64url,
+    );
+    const frozenInputBodies: string[] = [];
 
     for (const flag of [
       "--worker-bootstrap-receipt",
@@ -6489,8 +6565,18 @@ describe("sealed probe observation receipt", () => {
       const input = attempt1RegistrationArgs[
         attempt1RegistrationArgs.indexOf(flag) + 1
       ];
-      if (input && existsSync(input)) unlinkSync(input);
+      if (input && existsSync(input)) {
+        frozenInputBodies.push(readFileSync(input, "utf8").trim());
+        unlinkSync(input);
+      }
     }
+    const rawV2AuthorityValues = [
+      rawAttempt1Capability,
+      rawCaptainCapability,
+      exactBundleBytes.toString("utf8").trim(),
+      signedObservationSignature,
+      ...frozenInputBodies,
+    ];
     const beforeHistoricalV2Retry = ordinaryFileSnapshot(
       positive.repository.controlDir,
     );
@@ -6525,8 +6611,36 @@ describe("sealed probe observation receipt", () => {
       .toBe(registeredAttempt1.task_nonce);
     expect(historicalAttempt1.actor_capability_file)
       .toBe(registeredAttempt1.actor_capability_file);
+    expectSerializedSurfaceNoEcho(
+      historicalAttempt1,
+      rawV2AuthorityValues,
+    );
     expect(ordinaryFileSnapshot(positive.repository.controlDir))
       .toEqual(beforeHistoricalV2Retry);
+
+    const variantThreadId =
+      platformUuid("variant-v2-retry-thread");
+    const variantThreadArgs = [...attempt1RegistrationArgs];
+    variantThreadArgs[variantThreadArgs.indexOf("--thread") + 1] =
+      variantThreadId;
+    const beforeVariantRetry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    expectExactControlErrorNoEcho(
+      () => goalCommand(
+        variantThreadArgs,
+        positive.p1.worktree,
+        workerAttempt1,
+      ),
+      "EVENT_ID_CONFLICT",
+      "registration event id register-dev-positive-1 已被不同请求使用",
+      [
+        ...rawV2AuthorityValues,
+        variantThreadId,
+      ],
+    );
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeVariantRetry);
 
     const missingBundleFile = path.join(
       positive.artifacts,
@@ -6536,11 +6650,20 @@ describe("sealed probe observation receipt", () => {
     const beforeMissingBundleRetry = ordinaryFileSnapshot(
       positive.repository.controlDir,
     );
-    expect(() => goalCommand(
-      attempt1RegistrationArgs,
-      positive.p1.worktree,
-      workerAttempt1,
-    )).toThrow();
+    expectExactControlErrorNoEcho(
+      () => goalCommand(
+        attempt1RegistrationArgs,
+        positive.p1.worktree,
+        workerAttempt1,
+      ),
+      "ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID",
+      "accepted role identity append-only authority 缺失或漂移",
+      [
+        ...rawV2AuthorityValues,
+        exactBundleFile,
+        missingBundleFile,
+      ],
+    );
     expect(ordinaryFileSnapshot(positive.repository.controlDir))
       .toEqual(beforeMissingBundleRetry);
     renameSync(missingBundleFile, exactBundleFile);
@@ -6553,47 +6676,135 @@ describe("sealed probe observation receipt", () => {
     const beforeMovedBundleRetry = ordinaryFileSnapshot(
       positive.repository.controlDir,
     );
-    expect(() => goalCommand(
-      attempt1RegistrationArgs,
-      positive.p1.worktree,
-      workerAttempt1,
-    )).toThrow();
+    expectExactControlErrorNoEcho(
+      () => goalCommand(
+        attempt1RegistrationArgs,
+        positive.p1.worktree,
+        workerAttempt1,
+      ),
+      "ROLE_IDENTITY_BUNDLE_INVALID",
+      "role identity atomic bundle path binding 非法",
+      [
+        ...rawV2AuthorityValues,
+        exactBundleFile,
+        movedBundleFile,
+      ],
+    );
     expect(ordinaryFileSnapshot(positive.repository.controlDir))
       .toEqual(beforeMovedBundleRetry);
     renameSync(movedBundleFile, exactBundleFile);
 
-    const variantThreadArgs = [...attempt1RegistrationArgs];
-    variantThreadArgs[variantThreadArgs.indexOf("--thread") + 1] =
-      platformUuid("variant-v2-retry-thread");
-    const beforeVariantRetry = ordinaryFileSnapshot(
-      positive.repository.controlDir,
+    const tampered = setup();
+    const tamperedWorker = createDetachedWorker(
+      tampered.repository,
+      tampered.p1.fullHead,
     );
-    expect(() => goalCommand(
-      variantThreadArgs,
-      positive.p1.worktree,
-      workerAttempt1,
-    )).toThrow();
-    expect(ordinaryFileSnapshot(positive.repository.controlDir))
-      .toEqual(beforeVariantRetry);
-
-    const tamperedBundle = JSON.parse(
-      exactBundleBytes.toString("utf8"),
+    const tamperedBootstrap = prepareWorkerBootstrap(
+      tampered.repository,
+      tampered.p1.worktree,
+      tamperedWorker,
+      {
+        operationId: "launch-dev-tampered-bundle-1",
+        challenge: "e7".repeat(32),
+        threadId: "actual-dev-tampered-bundle-thread-1",
+        hostId: "actual-dev-tampered-bundle-host-1",
+      },
     );
-    tamperedBundle.intent.thread_id =
+    let tamperedRegistrationArgs: string[] = [];
+    const tamperedRegistration = registerWorkerIdentity(
+      tampered.repository,
+      tampered.p1.worktree,
+      tampered.artifacts,
+      tampered.captain,
+      tamperedWorker,
+      tamperedBootstrap,
+      {
+        eventId: "register-dev-tampered-bundle-1",
+        threadId: "actual-dev-tampered-bundle-thread-1",
+        hostId: "actual-dev-tampered-bundle-host-1",
+        attempt: 1,
+        launchId: "launch-dev-tampered-bundle-1",
+        beforeRegister: (args) => {
+          tamperedRegistrationArgs = [...args];
+        },
+      },
+    );
+    const tamperedLoaded = loadGoalStateReadOnly(
+      tampered.p1.worktree,
+      "goal-receipt-integration",
+      (loaded) => loaded,
+    );
+    const tamperedBundleFile = readdirSync(
+      tamperedLoaded.paths.roleIdentityIntents,
+    )
+      .filter((name) => (
+        name.endsWith(".role-identity-bundle.json")
+      ))
+      .map((name) => path.join(
+        tamperedLoaded.paths.roleIdentityIntents,
+        name,
+      ))
+      .find((file) => (
+        JSON.parse(readFileSync(file, "utf8")).operation_id
+          === "register-dev-tampered-bundle-1"
+      ));
+    expect(tamperedBundleFile).toBeDefined();
+    const tamperedBundleBytes = readFileSync(
+      String(tamperedBundleFile),
+      "utf8",
+    );
+    const rawTamperedInputBodies = [
+      "--worker-bootstrap-receipt",
+      "--probe-observation-receipt",
+      "--probe-observation-plan",
+    ].map((flag) => (
+      readFileSync(
+        tamperedRegistrationArgs[
+          tamperedRegistrationArgs.indexOf(flag) + 1
+        ],
+        "utf8",
+      ).trim()
+    ));
+    const originalTamperedBundle = JSON.parse(tamperedBundleBytes);
+    const tamperedThreadId =
       platformUuid("tampered-v2-retry-thread");
+    const tamperedBundle = JSON.parse(tamperedBundleBytes);
+    tamperedBundle.intent.thread_id = tamperedThreadId;
     writeFileSync(
-      exactBundleFile,
+      String(tamperedBundleFile),
       `${JSON.stringify(tamperedBundle, null, 2)}\n`,
     );
     const beforeTamperedBundleRetry = ordinaryFileSnapshot(
-      positive.repository.controlDir,
+      tampered.repository.controlDir,
     );
-    expect(() => goalCommand(
-      attempt1RegistrationArgs,
-      positive.p1.worktree,
-      workerAttempt1,
-    )).toThrow();
-    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+    expectExactControlErrorNoEcho(
+      () => goalCommand(
+        tamperedRegistrationArgs,
+        tampered.p1.worktree,
+        tamperedWorker,
+      ),
+      "ROLE_IDENTITY_INTENT_INVALID",
+      "role identity intent schema/hash/binding 非法",
+      [
+        readFileSync(
+          String(tamperedRegistration.actor_capability_file),
+          "utf8",
+        ).trim(),
+        readFileSync(
+          String(tampered.captain.actor_capability_file),
+          "utf8",
+        ).trim(),
+        tamperedBundleBytes.trim(),
+        String(
+          originalTamperedBundle.intent.identity_observation
+            .signed_record.attestation.signature_base64url,
+        ),
+        ...rawTamperedInputBodies,
+        tamperedThreadId,
+        JSON.stringify(tamperedBundle),
+      ],
+    );
+    expect(ordinaryFileSnapshot(tampered.repository.controlDir))
       .toEqual(beforeTamperedBundleRetry);
   });
 
