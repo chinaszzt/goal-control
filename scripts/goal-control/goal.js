@@ -146,6 +146,7 @@ const {
   workerBootstrapRequestMatchesBinding,
 } = require('./worker-bootstrap-binding');
 const {
+  ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
   abandonmentReceiptsForTask,
   abandonP1CommitRef,
   acceptedP1Event,
@@ -3488,6 +3489,8 @@ function publicProjection(source) {
     if (!candidate || typeof candidate !== 'object') return;
     delete candidate.capability_file;
     delete candidate.capability_sha256;
+    delete candidate.capability_file_identity_sha256;
+    delete candidate.source_capability_file_identity_sha256;
     for (const nested of Object.values(candidate)) redact(nested);
   };
   redact(value);
@@ -7857,7 +7860,7 @@ function finalizeAcceptedMechanicalP1Transaction(
     assertControl(
       !accepted.p1_commit_transaction,
       'CORRUPT_STORE',
-      `accepted P1 transaction ${accepted.event_id} 缺 retained intent/bundle`,
+      ACCEPTED_P1_TRANSACTION_MISSING_INTENT_MESSAGE,
     );
     if (receipt) {
       assertControl(

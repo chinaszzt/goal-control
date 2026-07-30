@@ -112,6 +112,26 @@ function sha256(body: string | Buffer): string {
   return `sha256:${createHash("sha256").update(body).digest("hex")}`;
 }
 
+function ordinaryFileSnapshot(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  if (!existsSync(root)) return snapshot;
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const entry = path.join(directory, name);
+      const stat = statSync(entry);
+      if (stat.isDirectory()) {
+        visit(entry);
+      } else if (stat.isFile()) {
+        snapshot[path.relative(root, entry)] = createHash("sha256")
+          .update(readFileSync(entry))
+          .digest("hex");
+      }
+    }
+  };
+  visit(root);
+  return snapshot;
+}
+
 function writeJson(file: string, value: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -2185,6 +2205,11 @@ describe("mechanically scoped fresh-Goal P1", () => {
           `${String(committed.event_id)}.json`,
         ));
       }
+      const rawCapabilityBytes = [
+        fixture.capabilities.FOREMAN,
+        fixture.capabilities.CAPTAIN,
+      ].map((file) => readFileSync(file as string, "utf8").trim());
+      const beforeRead = ordinaryFileSnapshot(fixture.controlDir);
       const status = run(fixture, [
         "status",
         "--goal",
@@ -2194,8 +2219,18 @@ describe("mechanically scoped fresh-Goal P1", () => {
         "--json",
       ]);
       expect(status.code).toBe(2);
-      expect(status.stderr).toContain("CORRUPT_STORE");
-      expect(status.stderr).toContain("retained intent");
+      expect(status.stdout).toBe("");
+      expect(status.stderr).toBe(
+        deleteReceipt
+          ? "goalctl[CORRUPT_STORE]: accepted P1 transaction 缺 retained intent/bundle\n"
+          : "goalctl[CORRUPT_STORE]: P1 commit receipt 缺 retained intent\n",
+      );
+      expect(String(committed.event_id)).toHaveLength(43);
+      expect(status.stderr).not.toContain(String(committed.event_id));
+      for (const secret of rawCapabilityBytes) {
+        expect(status.stderr).not.toContain(secret);
+      }
+      expect(ordinaryFileSnapshot(fixture.controlDir)).toEqual(beforeRead);
     },
   );
 

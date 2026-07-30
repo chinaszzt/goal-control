@@ -1183,6 +1183,7 @@ describe("goal control capability chain", () => {
     expect(parse(recoveredByAuthorizer)).toMatchObject({
       registered: true,
       idempotent: true,
+      actor_capability_file: capabilities.CAPTAIN,
     });
 
     const repeated = runCli(fixture, [
@@ -1192,7 +1193,18 @@ describe("goal control capability chain", () => {
       "--json",
     ]);
     expect(repeated.code).toBe(0);
-    expect(parse(repeated)).toMatchObject({ registered: true, idempotent: true });
+    expect(parse(repeated)).toMatchObject({
+      registered: true,
+      idempotent: true,
+      actor_capability_file: capabilities.CAPTAIN,
+    });
+    for (const privateCapabilityBytes of [
+      capabilities.FOREMAN,
+      capabilities.CAPTAIN,
+    ].map((file) => readFileSync(file as string, "utf8").trim())) {
+      expect(recoveredByAuthorizer.stdout).not.toContain(privateCapabilityBytes);
+      expect(repeated.stdout).not.toContain(privateCapabilityBytes);
+    }
 
     const publicReads = [
       runCli(fixture, ["status", "--goal", "demo", "--json"]),
@@ -1201,8 +1213,14 @@ describe("goal control capability chain", () => {
     for (const result of publicReads) {
       if (result.code !== 0) throw new Error(JSON.stringify(result));
       expect(result.code).toBe(0);
-      expect(result.stdout).not.toContain("capability_file");
-      expect(result.stdout).not.toContain("capability_sha256");
+      for (const privateField of [
+        "capability_file",
+        "capability_sha256",
+        "capability_file_identity_sha256",
+        "source_capability_file_identity_sha256",
+      ]) {
+        expect(result.stdout).not.toContain(privateField);
+      }
     }
   });
 
@@ -2457,10 +2475,28 @@ describe("goal control trusted evidence registry", () => {
     );
     expect(durableState).toContain("capability_file");
     expect(durableState).toContain("capability_sha256");
+    expect(durableState).toContain("capability_file_identity_sha256");
+    const privateIdentityHashes = Object.values(durableTask.sessions)
+      .map((session) => (
+        session as TaskState["sessions"][Role] & {
+          capability_file_identity_sha256?: string;
+          source_capability_file_identity_sha256?: string;
+        }
+      ))
+      .flatMap((session) => [
+        session.capability_file_identity_sha256,
+        session.source_capability_file_identity_sha256,
+      ])
+      .filter((value): value is string => typeof value === "string");
+    expect(privateIdentityHashes.length).toBeGreaterThan(0);
+    const privateCapabilityBytes = Object.values(capabilities)
+      .filter((file) => existsSync(file))
+      .map((file) => readFileSync(file, "utf8").trim());
 
     const publicReads = [
       runCli(fixture, ["status", "--goal", "demo", "--task", "TASK-A", "--json"]),
       runCli(fixture, ["next", "--goal", "demo", "--json"]),
+      runCli(fixture, ["rebuild-ledger", "--goal", "demo", "--json"]),
       runCli(fixture, [
         "actions", "--goal", "demo", "--task", "TASK-A",
         "--role", "CAPTAIN", "--thread", THREADS.CAPTAIN, "--json",
@@ -2472,8 +2508,20 @@ describe("goal control trusted evidence registry", () => {
     ];
     for (const result of publicReads) {
       expect(result.code).toBe(0);
-      expect(result.stdout).not.toContain("capability_file");
-      expect(result.stdout).not.toContain("capability_sha256");
+      for (const privateField of [
+        "capability_file",
+        "capability_sha256",
+        "capability_file_identity_sha256",
+        "source_capability_file_identity_sha256",
+      ]) {
+        expect(result.stdout).not.toContain(privateField);
+      }
+      for (const privateValue of [
+        ...privateIdentityHashes,
+        ...privateCapabilityBytes,
+      ]) {
+        expect(result.stdout).not.toContain(privateValue);
+      }
     }
     expect(publicReads[0].stdout).toContain(THREADS.DEV);
     expect(publicReads[0].stdout).toContain(ids.fast);
