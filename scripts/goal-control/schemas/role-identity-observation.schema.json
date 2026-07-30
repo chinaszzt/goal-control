@@ -66,16 +66,7 @@
           "type": "string",
           "minLength": 86,
           "maxLength": 86,
-          "allOf": [
-            {
-              "pattern": "^[A-Za-z0-9_-]{86}$"
-            },
-            {
-              "not": {
-              "pattern": "(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})"
-              }
-            }
-          ]
+          "pattern": "^[A-Za-z0-9_-]{86}$"
         }
       }
     },

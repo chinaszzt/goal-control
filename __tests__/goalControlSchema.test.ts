@@ -1,5 +1,9 @@
 import { createRequire } from "module";
-import { createHash } from "crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  sign,
+} from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -33,6 +37,7 @@ const {
   validateLegacyRoleIdentityIntent,
   validateRoleIdentityIntent,
   validateRoleIdentityObservationStructure,
+  verifyRoleIdentityObservationRecord,
 } = nodeRequire(
   path.join(
     ROOT,
@@ -50,10 +55,15 @@ const {
   validateRoleIdentityObservationStructure: (
     value: Record<string, any>,
   ) => Record<string, any>;
+  verifyRoleIdentityObservationRecord: (
+    value: Record<string, any>,
+    hostAttestation: Record<string, any>,
+  ) => Record<string, any>;
 };
-const { hashObject } = nodeRequire(
+const { canonicalJson, hashObject } = nodeRequire(
   path.join(ROOT, "scripts", "goal-control", "util.js"),
 ) as {
+  canonicalJson: (value: unknown) => string;
   hashObject: (value: unknown) => string;
 };
 const { validateWorkerBootstrapBinding } = nodeRequire(
@@ -506,6 +516,88 @@ describe("goal-control machine contract schemas", () => {
       },
       created_at: "2026-07-29T01:02:04.005Z",
     };
+    const hostKeyPair = generateKeyPairSync("ed25519");
+    const hostPublicKey = hostKeyPair.publicKey.export({
+      format: "der",
+      type: "spki",
+    });
+    const hostAttestation = {
+      algorithm: "ED25519",
+      key_id: "host-attestation-schema-credential-shape",
+      public_key_sha256: `sha256:${createHash("sha256")
+        .update(hostPublicKey)
+        .digest("hex")}`,
+      public_key_spki_base64:
+        hostPublicKey.toString("base64"),
+    };
+    const credentialPattern =
+      /(?:[gG][hH][pPoOuUsSrR][_-][A-Za-z0-9_-]{8,}|[gG][iI][tT][hH][uU][bB][_-][pP][aA][tT][_-][A-Za-z0-9_-]{8,}|[xX][oO][xX][bBaApPrRsS][_-][A-Za-z0-9_-]{8,})/;
+    let credentialSignatureObservation:
+      Record<string, any> | null = null;
+    for (let index = 0; index < 50_000; index += 1) {
+      const candidateUnsigned = {
+        ...structuredClone(observation),
+        operation_id: `signature-sample-${index}`,
+        attestation: {
+          algorithm: hostAttestation.algorithm,
+          key_id: hostAttestation.key_id,
+          public_key_sha256:
+            hostAttestation.public_key_sha256,
+        },
+      };
+      delete candidateUnsigned.record_sha256;
+      const signatureBase64url = sign(
+        null,
+        Buffer.from(canonicalJson(candidateUnsigned)),
+        hostKeyPair.privateKey,
+      ).toString("base64url");
+      if (!credentialPattern.test(signatureBase64url)) continue;
+      const sealed = {
+        ...candidateUnsigned,
+        attestation: {
+          ...candidateUnsigned.attestation,
+          signature_base64url: signatureBase64url,
+        },
+      };
+      credentialSignatureObservation = {
+        ...sealed,
+        record_sha256: hashObject(sealed),
+      };
+      break;
+    }
+    expect(credentialSignatureObservation).not.toBeNull();
+    expect(schemaObservation(credentialSignatureObservation))
+      .toBe(true);
+    expect(runtimeObservation(credentialSignatureObservation!))
+      .toBe(true);
+    expect(() => verifyRoleIdentityObservationRecord(
+      credentialSignatureObservation!,
+      hostAttestation,
+    )).not.toThrow();
+    const relocatedCredentialSignature = {
+      ...structuredClone(credentialSignatureObservation),
+      operation_id:
+        credentialSignatureObservation!.attestation
+          .signature_base64url,
+    };
+    expect(schemaObservation(relocatedCredentialSignature))
+      .toBe(false);
+    expect(runtimeObservation(relocatedCredentialSignature))
+      .toBe(false);
+    const credentialSignatureIntentCore = {
+      ...structuredClone(intentCore),
+      operation_id:
+        credentialSignatureObservation!.operation_id,
+      identity_observation: {
+        ...structuredClone(intentCore.identity_observation),
+        record_sha256:
+          credentialSignatureObservation!.record_sha256,
+        attestation_key_id:
+          credentialSignatureObservation!.attestation.key_id,
+        signed_record:
+          credentialSignatureObservation,
+      },
+    };
     const sealIntent = (
       value: Record<string, any>,
     ): Record<string, any> => {
@@ -672,6 +764,18 @@ describe("goal-control machine contract schemas", () => {
       sealIntent(intentCore),
       true,
     );
+    const credentialSignatureIntent =
+      sealIntent(credentialSignatureIntentCore);
+    parity(
+      schemaIntent,
+      runtimeIntent,
+      credentialSignatureIntent,
+      true,
+    );
+    expect(() => verifyRoleIdentityObservationRecord(
+      credentialSignatureIntent.identity_observation.signed_record,
+      hostAttestation,
+    )).not.toThrow();
     parity(
       schemaIntent,
       runtimeIntent,
@@ -850,6 +954,39 @@ describe("goal-control machine contract schemas", () => {
       bundle_sha256: hashObject(bundleUnsigned),
     };
     expect(compositeBundle(bundle)).toBe(true);
+    const credentialSignatureChallengeUnsigned = {
+      ...challengeUnsigned,
+      registration_event_id:
+        credentialSignatureIntent.operation_id,
+      attestation_key_id:
+        credentialSignatureIntent.identity_observation
+          .attestation_key_id,
+      attestation_public_key_sha256:
+        credentialSignatureIntent.identity_observation.signed_record
+          .attestation.public_key_sha256,
+    };
+    const credentialSignatureChallenge = {
+      ...credentialSignatureChallengeUnsigned,
+      record_sha256:
+        hashObject(credentialSignatureChallengeUnsigned),
+    };
+    const credentialSignatureBundleUnsigned = {
+      schema_version: 2,
+      kind: "ROLE_IDENTITY_CHALLENGE_BUNDLE",
+      operation_id: credentialSignatureIntent.operation_id,
+      semantic_slot_sha256:
+        credentialSignatureIntent.semantic_slot_sha256,
+      intent: credentialSignatureIntent,
+      challenge: credentialSignatureChallenge,
+    };
+    const credentialSignatureBundle = {
+      ...credentialSignatureBundleUnsigned,
+      bundle_sha256:
+        hashObject(credentialSignatureBundleUnsigned),
+    };
+    expect(schemaBundle(credentialSignatureBundle)).toBe(true);
+    expect(runtimeBundle(credentialSignatureBundle)).toBe(true);
+    expect(compositeBundle(credentialSignatureBundle)).toBe(true);
     const bundleForOperationId = (
       operationId: string,
     ): Record<string, any> => {
