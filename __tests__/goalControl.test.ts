@@ -13,6 +13,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -377,6 +378,26 @@ function makeGoalRepo(): GoalFixture {
 function json(result: CliResult): Record<string, unknown> {
   expect(result.stdout).not.toBe("");
   return JSON.parse(result.stdout) as Record<string, unknown>;
+}
+
+function ordinaryFileSnapshot(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {};
+  if (!existsSync(root)) return snapshot;
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const entry = path.join(directory, name);
+      const stat = statSync(entry);
+      if (stat.isDirectory()) {
+        visit(entry);
+      } else if (stat.isFile()) {
+        snapshot[path.relative(root, entry)] = createHash("sha256")
+          .update(readFileSync(entry))
+          .digest("hex");
+      }
+    }
+  };
+  visit(root);
+  return snapshot;
 }
 
 function initGoal(fixture: GoalFixture): void {
@@ -2087,6 +2108,8 @@ describe("scripts/goalctl.js", () => {
     });
 
     unlinkSync(path.join(fixture.root, "docs", "protocol", "shared.md"));
+    const beforeHistoricalRetry =
+      ordinaryFileSnapshot(fixture.controlDir);
     const repeated = runCli(originalRegistration, fixture.root, fixture.controlDir);
     expect(repeated.code).toBe(0);
     const body = json(repeated);
@@ -2111,6 +2134,55 @@ describe("scripts/goalctl.js", () => {
     expect(body.task_nonce).toBe(firstRetryBody.task_nonce);
     expect(body.actor_capability_file).toBe(firstRetryBody.actor_capability_file);
     expect(existsSync(String(body.actor_capability_file))).toBe(true);
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeHistoricalRetry);
+
+    const variantLaunch = [...originalRegistration];
+    variantLaunch[variantLaunch.indexOf("--launch-id") + 1] =
+      "launch-dev-response-loss-variant";
+    const beforeVariantLaunch =
+      ordinaryFileSnapshot(fixture.controlDir);
+    expectControlError(
+      runCli(variantLaunch, fixture.root, fixture.controlDir),
+      "EVENT_ID_CONFLICT",
+    );
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeVariantLaunch);
+
+    const syntheticReceipt = path.join(
+      fixture.root,
+      "synthetic-v2-receipt.json",
+    );
+    const syntheticPlan = path.join(
+      fixture.root,
+      "synthetic-v2-plan.json",
+    );
+    writeFileSync(syntheticReceipt, "{}\n");
+    writeFileSync(syntheticPlan, "{}\n");
+    const syntheticReceiptSha = createHash("sha256")
+      .update(readFileSync(syntheticReceipt))
+      .digest("hex");
+    const syntheticPlanSha = createHash("sha256")
+      .update(readFileSync(syntheticPlan))
+      .digest("hex");
+    const mixedRetry = [
+      ...originalRegistration,
+      "--probe-observation-receipt", syntheticReceipt,
+      "--probe-observation-receipt-sha256", syntheticReceiptSha,
+      "--probe-observation-plan", syntheticPlan,
+      "--probe-observation-plan-sha256", syntheticPlanSha,
+      "--probe-observation-stable-id",
+      "canary-observation-synthetic-legacy-retry",
+      "--probe-observation-challenge", "ab".repeat(32),
+    ];
+    const beforeMixedRetry =
+      ordinaryFileSnapshot(fixture.controlDir);
+    expectControlError(
+      runCli(mixedRetry, fixture.root, fixture.controlDir),
+      "EVENT_ID_CONFLICT",
+    );
+    expect(ordinaryFileSnapshot(fixture.controlDir))
+      .toEqual(beforeMixedRetry);
   });
 
   it("recovers one sealed registration capability and nonce after child exit and authorizer lease expiry", () => {

@@ -6254,6 +6254,55 @@ function authorizeRegistrationRetry(root, loaded, state, options, accepted) {
   return session;
 }
 
+function assertAcceptedRegistrationRetryIdentityAuthority(
+  loaded,
+  accepted,
+  registrationBundleCapture,
+) {
+  const bundleRequired =
+    probeObservationProtocolRequired(loaded.manifest);
+  const roleIdentity = accepted
+    && accepted.payload
+    && accepted.payload.role_identity;
+  const probeObservation = accepted
+    && accepted.payload
+    && accepted.payload.probe_observation;
+  if (!bundleRequired) {
+    assertControl(
+      registrationBundleCapture === null
+        && roleIdentity === undefined
+        && probeObservation === undefined,
+      'EVENT_ID_CONFLICT',
+      'markerless/no-probe accepted registration 禁止消费 role identity bundle',
+    );
+    return;
+  }
+  assertControl(
+    Number(loaded.meta.role_identity_protocol_version || 1) >= 2
+      && roleIdentity
+      && roleIdentity.protocol
+        === 'goalctl-role-identity-intent-v2'
+      && probeObservation
+      && registrationBundleCapture
+      && exactRoleIdentityConsumer(
+        {
+          ...registrationBundleCapture,
+          operation_id:
+            registrationBundleCapture.bundle.operation_id,
+          intent: registrationBundleCapture.bundle.intent,
+        },
+        accepted,
+        loaded.meta,
+      ),
+    'EVENT_ID_CONFLICT',
+    'accepted registration 与 descriptor-bound role identity bundle 不匹配',
+  );
+  assertRegistrationBundleCaptureCurrent(
+    loaded.paths,
+    registrationBundleCapture,
+  );
+}
+
 function assertFreshGoalRoleIdentity(snapshot, taskId, role, threadId) {
   for (const [candidateTaskId, state] of Object.entries(snapshot.tasks || {})) {
     for (const session of Object.values(state.sessions || {})) {
@@ -15483,6 +15532,11 @@ function registerRole(cwd, options) {
     const existing = state.sessions[options.role];
     if (eventIdOccurrences.length === 1) {
       const accepted = acceptedGoalEvent(root, loaded, options.taskId, eventId);
+      assertAcceptedRegistrationRetryIdentityAuthority(
+        loaded,
+        accepted,
+        registrationBundleCapture,
+      );
       const retriedSession = authorizeRegistrationRetry(
         root,
         loaded,
@@ -16205,23 +16259,9 @@ function registerRole(cwd, options) {
           stableRegistrationEventId,
         );
         if (acceptedRegistration) {
-          assertControl(
-            registrationBundleCapture
-              && exactRoleIdentityConsumer(
-                {
-                  ...registrationBundleCapture,
-                  operation_id:
-                    registrationBundleCapture.bundle.operation_id,
-                  intent: registrationBundleCapture.bundle.intent,
-                },
-                acceptedRegistration,
-                prevalidated.meta,
-              ),
-            'EVENT_ID_CONFLICT',
-            'accepted registration 与 descriptor-bound role identity bundle 不匹配',
-          );
-          assertRegistrationBundleCaptureCurrent(
-            prevalidated.paths,
+          assertAcceptedRegistrationRetryIdentityAuthority(
+            prevalidated,
+            acceptedRegistration,
             registrationBundleCapture,
           );
           const retriedSession = authorizeRegistrationRetry(

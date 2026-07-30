@@ -6347,6 +6347,7 @@ describe("sealed probe observation receipt", () => {
         hostId: "actual-dev-positive-host-1",
       },
     );
+    let attempt1RegistrationArgs: string[] = [];
     const registeredAttempt1 = registerWorkerIdentity(
       positive.repository,
       positive.p1.worktree,
@@ -6360,6 +6361,9 @@ describe("sealed probe observation receipt", () => {
         hostId: "actual-dev-positive-host-1",
         attempt: 1,
         launchId: "launch-dev-positive-1",
+        beforeRegister: (args) => {
+          attempt1RegistrationArgs = [...args];
+        },
       },
     );
     submitPublicGoalEvent(
@@ -6462,6 +6466,135 @@ describe("sealed probe observation receipt", () => {
         worker_bootstrap_binding_sha256:
           bootstrapAttempt2.binding.binding_sha256,
       });
+
+    const bundleDirectory = positiveLoaded.paths.roleIdentityIntents;
+    const attempt1BundleFile = readdirSync(bundleDirectory)
+      .filter((name) => (
+        name.endsWith(".role-identity-bundle.json")
+      ))
+      .map((name) => path.join(bundleDirectory, name))
+      .find((file) => (
+        JSON.parse(readFileSync(file, "utf8")).operation_id
+          === "register-dev-positive-1"
+      ));
+    expect(attempt1BundleFile).toBeDefined();
+    const exactBundleFile = String(attempt1BundleFile);
+    const exactBundleBytes = readFileSync(exactBundleFile);
+
+    for (const flag of [
+      "--worker-bootstrap-receipt",
+      "--probe-observation-receipt",
+      "--probe-observation-plan",
+    ]) {
+      const input = attempt1RegistrationArgs[
+        attempt1RegistrationArgs.indexOf(flag) + 1
+      ];
+      if (input && existsSync(input)) unlinkSync(input);
+    }
+    const beforeHistoricalV2Retry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    const historicalAttempt1 = goalCommand(
+      attempt1RegistrationArgs,
+      positive.p1.worktree,
+      workerAttempt1,
+    ).value;
+    expect(historicalAttempt1).toMatchObject({
+      registered: true,
+      idempotent: true,
+      task: {
+        sessions: {
+          DEV: {
+            thread_id:
+              platformUuid("actual-dev-positive-thread-2"),
+            host_id:
+              platformUuid("actual-dev-positive-host-2"),
+            attempt: 2,
+          },
+        },
+      },
+      session: {
+        thread_id:
+          platformUuid("actual-dev-positive-thread-1"),
+        host_id:
+          platformUuid("actual-dev-positive-host-1"),
+        attempt: 1,
+      },
+    });
+    expect(historicalAttempt1.task_nonce)
+      .toBe(registeredAttempt1.task_nonce);
+    expect(historicalAttempt1.actor_capability_file)
+      .toBe(registeredAttempt1.actor_capability_file);
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeHistoricalV2Retry);
+
+    const missingBundleFile = path.join(
+      positive.artifacts,
+      "register-dev-positive-1-missing-bundle.json",
+    );
+    renameSync(exactBundleFile, missingBundleFile);
+    const beforeMissingBundleRetry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    expect(() => goalCommand(
+      attempt1RegistrationArgs,
+      positive.p1.worktree,
+      workerAttempt1,
+    )).toThrow();
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeMissingBundleRetry);
+    renameSync(missingBundleFile, exactBundleFile);
+
+    const movedBundleFile = path.join(
+      bundleDirectory,
+      `${"0".repeat(64)}.role-identity-bundle.json`,
+    );
+    renameSync(exactBundleFile, movedBundleFile);
+    const beforeMovedBundleRetry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    expect(() => goalCommand(
+      attempt1RegistrationArgs,
+      positive.p1.worktree,
+      workerAttempt1,
+    )).toThrow();
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeMovedBundleRetry);
+    renameSync(movedBundleFile, exactBundleFile);
+
+    const variantThreadArgs = [...attempt1RegistrationArgs];
+    variantThreadArgs[variantThreadArgs.indexOf("--thread") + 1] =
+      platformUuid("variant-v2-retry-thread");
+    const beforeVariantRetry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    expect(() => goalCommand(
+      variantThreadArgs,
+      positive.p1.worktree,
+      workerAttempt1,
+    )).toThrow();
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeVariantRetry);
+
+    const tamperedBundle = JSON.parse(
+      exactBundleBytes.toString("utf8"),
+    );
+    tamperedBundle.intent.thread_id =
+      platformUuid("tampered-v2-retry-thread");
+    writeFileSync(
+      exactBundleFile,
+      `${JSON.stringify(tamperedBundle, null, 2)}\n`,
+    );
+    const beforeTamperedBundleRetry = ordinaryFileSnapshot(
+      positive.repository.controlDir,
+    );
+    expect(() => goalCommand(
+      attempt1RegistrationArgs,
+      positive.p1.worktree,
+      workerAttempt1,
+    )).toThrow();
+    expect(ordinaryFileSnapshot(positive.repository.controlDir))
+      .toEqual(beforeTamperedBundleRetry);
   });
 
   test("runs lost REVIEW/RECEIPT and post-rework successors through public bootstrap, preflight, and events", () => {
