@@ -3865,6 +3865,9 @@ describe("sealed probe observation receipt", () => {
       }
     }
     expect(signedObservation).not.toBeNull();
+    if (signedObservation === null) {
+      throw new Error("failed to produce credential-shaped test signature");
+    }
     const planEnvelope = canaryPlan(repository.root, {
       manifestFile: path.relative(
         repository.root,
@@ -3895,7 +3898,7 @@ describe("sealed probe observation receipt", () => {
 
     const relocated = structuredClone(signedObservation);
     relocated.goal_id =
-      signedObservation!.attestation.signature_base64url;
+      signedObservation.attestation.signature_base64url;
     const relocatedUnsigned = { ...relocated };
     delete relocatedUnsigned.record_sha256;
     relocated.record_sha256 = hashObject(relocatedUnsigned);

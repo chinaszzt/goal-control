@@ -535,7 +535,7 @@ describe("goal-control machine contract schemas", () => {
     let credentialSignatureObservation:
       Record<string, any> | null = null;
     for (let index = 0; index < 50_000; index += 1) {
-      const candidateUnsigned = {
+      const candidate = {
         ...structuredClone(observation),
         operation_id: `signature-sample-${index}`,
         attestation: {
@@ -545,7 +545,10 @@ describe("goal-control machine contract schemas", () => {
             hostAttestation.public_key_sha256,
         },
       };
-      delete candidateUnsigned.record_sha256;
+      const {
+        record_sha256: _omittedRecordSha256,
+        ...candidateUnsigned
+      } = candidate;
       const signatureBase64url = sign(
         null,
         Buffer.from(canonicalJson(candidateUnsigned)),
@@ -566,18 +569,21 @@ describe("goal-control machine contract schemas", () => {
       break;
     }
     expect(credentialSignatureObservation).not.toBeNull();
+    if (credentialSignatureObservation === null) {
+      throw new Error("failed to produce credential-shaped test signature");
+    }
     expect(schemaObservation(credentialSignatureObservation))
       .toBe(true);
-    expect(runtimeObservation(credentialSignatureObservation!))
+    expect(runtimeObservation(credentialSignatureObservation))
       .toBe(true);
     expect(() => verifyRoleIdentityObservationRecord(
-      credentialSignatureObservation!,
+      credentialSignatureObservation,
       hostAttestation,
     )).not.toThrow();
     const relocatedCredentialSignature = {
       ...structuredClone(credentialSignatureObservation),
       operation_id:
-        credentialSignatureObservation!.attestation
+        credentialSignatureObservation.attestation
           .signature_base64url,
     };
     expect(schemaObservation(relocatedCredentialSignature))
@@ -587,13 +593,13 @@ describe("goal-control machine contract schemas", () => {
     const credentialSignatureIntentCore = {
       ...structuredClone(intentCore),
       operation_id:
-        credentialSignatureObservation!.operation_id,
+        credentialSignatureObservation.operation_id,
       identity_observation: {
         ...structuredClone(intentCore.identity_observation),
         record_sha256:
-          credentialSignatureObservation!.record_sha256,
+          credentialSignatureObservation.record_sha256,
         attestation_key_id:
-          credentialSignatureObservation!.attestation.key_id,
+          credentialSignatureObservation.attestation.key_id,
         signed_record:
           credentialSignatureObservation,
       },
@@ -677,7 +683,8 @@ describe("goal-control machine contract schemas", () => {
       },
       true,
     );
-    const omittedObservationLaunch = structuredClone(observation);
+    const omittedObservationLaunch: Partial<typeof observation> =
+      structuredClone(observation);
     delete omittedObservationLaunch.launch_id;
     parity(
       schemaObservation,
@@ -733,7 +740,8 @@ describe("goal-control machine contract schemas", () => {
       { ...observation, unexpected: "field" },
       false,
     );
-    const missingObservation = structuredClone(observation);
+    const missingObservation: Partial<typeof observation> =
+      structuredClone(observation);
     delete missingObservation.session_id;
     parity(
       schemaObservation,
@@ -812,7 +820,8 @@ describe("goal-control machine contract schemas", () => {
       }),
       false,
     );
-    const omittedIntentLaunch = structuredClone(intentCore);
+    const omittedIntentLaunch: Partial<typeof intentCore> =
+      structuredClone(intentCore);
     delete omittedIntentLaunch.launch_id;
     parity(
       schemaIntent,
@@ -865,7 +874,8 @@ describe("goal-control machine contract schemas", () => {
       }),
       false,
     );
-    const missingIntent = structuredClone(intentCore);
+    const missingIntent: Partial<typeof intentCore> =
+      structuredClone(intentCore);
     delete missingIntent.identity_observation;
     parity(
       schemaIntent,
@@ -1323,7 +1333,8 @@ describe("goal-control machine contract schemas", () => {
       attempt: Number.MAX_SAFE_INTEGER + 1,
     }), false);
 
-    const missingV1Launch = structuredClone(identityV1);
+    const missingV1Launch: Partial<typeof identityV1> =
+      structuredClone(identityV1);
     delete missingV1Launch.launch_id;
     parity(withIdentity(missingV1Launch), false);
     parity(withIdentity({
@@ -1339,13 +1350,15 @@ describe("goal-control machine contract schemas", () => {
       unexpected: "field",
     }), false);
 
-    const missingV2Bundle = structuredClone(identityV2);
+    const missingV2Bundle: Partial<typeof identityV2> =
+      structuredClone(identityV2);
     delete missingV2Bundle.bundle_sha256;
     parity(withIdentity(missingV2Bundle), false);
     const missingV2Probe = withIdentity(identityV2);
     delete missingV2Probe.payload.probe_observation;
     parity(missingV2Probe, false);
-    const missingV2Bootstrap = structuredClone(identityV2);
+    const missingV2Bootstrap: Partial<typeof identityV2> =
+      structuredClone(identityV2);
     delete missingV2Bootstrap.worker_bootstrap_binding_sha256;
     parity(withIdentity(missingV2Bootstrap), false);
     parity(withIdentity({
@@ -1564,10 +1577,15 @@ describe("goal-control machine contract schemas", () => {
       },
     };
     parity(recoveryEvent, true);
-    const emptyRecoveryScope = structuredClone(recoveryEvent);
-    emptyRecoveryScope.payload.goal_scope = {};
+    const emptyRecoveryScope = {
+      ...structuredClone(recoveryEvent),
+      payload: {
+        ...structuredClone(recoveryEvent.payload),
+        goal_scope: {},
+      },
+    };
     parity(emptyRecoveryScope, false);
-    for (const field of [
+    const recoveryRequiredFields = [
       "capability_file_identity_sha256",
       "probe_observation",
       "role_identity",
@@ -1579,17 +1597,29 @@ describe("goal-control machine contract schemas", () => {
       "adoption_target_task_id",
       "adopt_without_local_foreman",
       "source_foreman",
-    ]) {
-      const omitted = structuredClone(recoveryEvent);
-      delete omitted.payload[field];
+    ] as const;
+    for (const field of recoveryRequiredFields) {
+      const omittedPayload: Partial<typeof recoveryEvent.payload> =
+        structuredClone(recoveryEvent.payload);
+      delete omittedPayload[field];
+      const omitted = {
+        ...structuredClone(recoveryEvent),
+        payload: omittedPayload,
+      };
       expect(schemaEvent(omitted)).toBe(false);
       if (runtimeEvent(omitted)) {
         throw new Error(
           `runtime accepted omitted v2 recovery field ${field}`,
         );
       }
-      const nullValue = structuredClone(recoveryEvent);
-      nullValue.payload[field] = null;
+      const nullPayload: {
+        [Key in keyof typeof recoveryEvent.payload]: unknown;
+      } = structuredClone(recoveryEvent.payload);
+      nullPayload[field] = null;
+      const nullValue = {
+        ...structuredClone(recoveryEvent),
+        payload: nullPayload,
+      };
       const nullAccepted = field === "adoption_target_task_id";
       expect(schemaEvent(nullValue)).toBe(nullAccepted);
       if (runtimeEvent(nullValue) !== nullAccepted) {
