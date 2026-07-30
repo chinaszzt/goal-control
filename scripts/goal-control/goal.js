@@ -5101,22 +5101,11 @@ function assertRoleIdentityAuthorityReplay(
       'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
       'accepted role identity session sibling authority 漂移',
     );
-    let bundleEntry;
-    try {
-      bundleEntry = readRoleIdentityBundleEntryByOperation(
-        paths,
-        binding.operation_id,
-      );
-    } catch {
-      throw new ControlError(
-        'ROLE_IDENTITY_AUTHORITY_REPLAY_INVALID',
-        'accepted role identity append-only authority 无法验证',
-      );
-    }
-    const bundle = bundleEntry && bundleEntry.bundle;
     const inventoryEntry = inventory.find((entry) => (
       entry.operation_id === binding.operation_id
     ));
+    const bundleEntry = inventoryEntry;
+    const bundle = bundleEntry && bundleEntry.bundle;
     const recoveryEvent = bundle
       && bundle.intent.issuer_authority.kind === 'GOAL_RECOVERY'
       && manifest
