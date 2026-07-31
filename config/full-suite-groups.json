@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "policy": {
+    "heartbeatSeconds": 15,
+    "maximumShardSeconds": 1200,
+    "ciSetupPostMarginSeconds": 600,
+    "entryTimeoutSeconds": 900,
+    "slowestItems": 20,
+    "diagnosticTailLines": 200
+  },
+  "groups": [
+    {
+      "id": "core-fsm",
+      "label": "Core / FSM",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "goalctl-github-merge",
+          "label": "goalctl canonical GitHub merge and reservation",
+          "file": "__tests__/goalControl.test.ts",
+          "testNamePattern": "GitHub|merge|MERGED|gh executable|reservation"
+        },
+        {
+          "id": "goalctl-recovery",
+          "label": "goalctl recovery, expiry, and transaction replay",
+          "file": "__tests__/goalControl.test.ts",
+          "testNamePattern": "^(?!.*(?:GitHub|merge|MERGED|gh executable|reservation)).*(?:recover|Recover|expired|expires|expiry|lost|successor|systemError|retry|response loss|SIGKILL|atomic temp|generation)"
+        },
+        {
+          "id": "goalctl-worker-evidence",
+          "label": "goalctl P1, worker, and evidence lifecycle",
+          "file": "__tests__/goalControl.test.ts",
+          "testNamePattern": "^(?!.*(?:GitHub|merge|MERGED|gh executable|reservation))(?!.*(?:recover|Recover|expired|expires|expiry|lost|successor|systemError|retry|response loss|SIGKILL|atomic temp|generation)).*(?:P1|DEV|REVIEW|RECEIPT|worker|role|evidence|preflight|security hold|source)"
+        },
+        {
+          "id": "goalctl-fsm-foundation",
+          "label": "goalctl FSM foundation and remaining lifecycle",
+          "file": "__tests__/goalControl.test.ts",
+          "testNamePattern": "^(?!.*(?:GitHub|merge|MERGED|gh executable|reservation))(?!.*(?:recover|Recover|expired|expires|expiry|lost|successor|systemError|retry|response loss|SIGKILL|atomic temp|generation))(?!.*(?:P1|DEV|REVIEW|RECEIPT|worker|role|evidence|preflight|security hold|source)).*$"
+        },
+        {
+          "id": "core-integrity",
+          "label": "schema, integrity, stable reads, and concurrency",
+          "file": "__tests__/goalControlIntegrity.test.ts"
+        },
+        {
+          "id": "core-schema",
+          "label": "schema compatibility",
+          "file": "__tests__/goalControlSchema.test.ts"
+        },
+        {
+          "id": "core-stable-read",
+          "label": "stable read projection",
+          "file": "__tests__/goalControlStableRead.test.ts"
+        },
+        {
+          "id": "core-concurrency",
+          "label": "core concurrency",
+          "file": "__tests__/goalControlConcurrency.test.ts"
+        },
+        {
+          "id": "core-transactions",
+          "label": "transaction coverage",
+          "file": "__tests__/goalControlTransactionCoverage.test.ts"
+        },
+        {
+          "id": "core-generation-hooks",
+          "label": "generation-boundary hooks",
+          "file": "__tests__/goalControlGenerationBoundaryHooks.test.ts"
+        },
+        {
+          "id": "extraction-provenance",
+          "label": "extraction provenance",
+          "file": "__tests__/extractionProvenance.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "git-worktree",
+      "label": "Git / worktree",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "mechanical-p1-init-handoff",
+          "label": "mechanical P1 init, ref, and handoff",
+          "file": "__tests__/goalControlMechanicalP1.test.ts",
+          "testNamePattern": "init|ref|handoff|ABANDON|carrier"
+        },
+        {
+          "id": "mechanical-p1-start-ready",
+          "label": "mechanical P1 start, ready, approval, and commit",
+          "file": "__tests__/goalControlMechanicalP1.test.ts",
+          "testNamePattern": "^(?!.*(?:init|ref|handoff|ABANDON|carrier)).*(?:START_P1|READY|approval|commit|worktree|authority)"
+        },
+        {
+          "id": "mechanical-p1-dependencies",
+          "label": "mechanical P1 dependency and remaining invariants",
+          "file": "__tests__/goalControlMechanicalP1.test.ts",
+          "testNamePattern": "^(?!.*(?:init|ref|handoff|ABANDON|carrier))(?!.*(?:START_P1|READY|approval|commit|worktree|authority)).*$"
+        },
+        {
+          "id": "mechanical-write-set",
+          "label": "mechanical write-set enforcement",
+          "file": "__tests__/goalControlMechanicalWriteSet.test.ts"
+        },
+        {
+          "id": "migration-worktrees",
+          "label": "migration worktrees",
+          "file": "__tests__/goalControlMigrationWorktrees.test.ts"
+        },
+        {
+          "id": "read-only-git",
+          "label": "read-only Git operations",
+          "file": "__tests__/goalControlReadOnlyGit.test.ts"
+        },
+        {
+          "id": "p1-ref-lock-recovery",
+          "label": "P1 ref-lock recovery",
+          "file": "__tests__/goalControlP1RefLockRecovery.test.ts"
+        },
+        {
+          "id": "worktree-files-head-transaction",
+          "label": "worktree files and HEAD transaction",
+          "file": "__tests__/goalControlWorktreeBootstrapFilesHeadTransaction.test.ts"
+        },
+        {
+          "id": "worktree-head-transaction",
+          "label": "worktree HEAD transaction",
+          "file": "__tests__/goalControlWorktreeBootstrapHeadTransaction.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "recovery-rotation",
+      "label": "Recovery / rotation",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "protocol-adoption-runtime",
+          "label": "protocol adoption, runtime, launch, and holds",
+          "file": "__tests__/goalControlProtocolRotation.test.ts",
+          "testNamePattern": "adopt|adoption|PREFLIGHT|launch|hold|STALE_HEAD|stale-head|runtime"
+        },
+        {
+          "id": "protocol-crash-retry",
+          "label": "protocol crash, retry, and publication recovery",
+          "file": "__tests__/goalControlProtocolRotation.test.ts",
+          "testNamePattern": "^(?!.*(?:adopt|adoption|PREFLIGHT|launch|hold|STALE_HEAD|stale-head|runtime)).*(?:crash|SIGKILL|retry|pending|orphan|reap|atomic|generation|publication|completion)"
+        },
+        {
+          "id": "protocol-controller-repositories",
+          "label": "protocol controller and cross-repository rotation",
+          "file": "__tests__/goalControlProtocolRotation.test.ts",
+          "testNamePattern": "^(?!.*(?:adopt|adoption|PREFLIGHT|launch|hold|STALE_HEAD|stale-head|runtime))(?!.*(?:crash|SIGKILL|retry|pending|orphan|reap|atomic|generation|publication|completion)).*(?:repository|repositories|controller|CLI)"
+        },
+        {
+          "id": "protocol-remaining-invariants",
+          "label": "protocol remaining rotation invariants",
+          "file": "__tests__/goalControlProtocolRotation.test.ts",
+          "testNamePattern": "^(?!.*(?:adopt|adoption|PREFLIGHT|launch|hold|STALE_HEAD|stale-head|runtime))(?!.*(?:crash|SIGKILL|retry|pending|orphan|reap|atomic|generation|publication|completion))(?!.*(?:repository|repositories|controller|CLI)).*$"
+        },
+        {
+          "id": "recovery-lifecycle",
+          "label": "recovery lifecycle",
+          "file": "__tests__/goalControlRecoveryLifecycle.test.ts"
+        },
+        {
+          "id": "init-recovery",
+          "label": "initialization recovery",
+          "file": "__tests__/goalControlInitRecovery.test.ts"
+        },
+        {
+          "id": "store-atomic-recovery",
+          "label": "store atomic recovery",
+          "file": "__tests__/goalControlStoreAtomicRecovery.test.ts"
+        },
+        {
+          "id": "runtime-rotation",
+          "label": "runtime rotation",
+          "file": "__tests__/goalControlRuntimeRotation.test.ts"
+        },
+        {
+          "id": "recovery-lease-gate",
+          "label": "recovery lease gate",
+          "file": "__tests__/goalControlRecoveryLeaseGate.test.ts"
+        },
+        {
+          "id": "atomic-crash-boundaries",
+          "label": "atomic crash boundaries",
+          "file": "__tests__/goalControlAtomicCrashBoundary.test.ts"
+        },
+        {
+          "id": "archive-finality",
+          "label": "archive byte finality",
+          "file": "__tests__/goalControlArchiveFinality.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "source-handoff",
+      "label": "Source handoff",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "source-checkpoint",
+          "label": "source checkpoint, Git fence, and branch publication",
+          "file": "__tests__/goalControlSourceHandoff.test.ts",
+          "testNamePattern": "checkpoint|index.lock|ref publication|branch|reflog|bisect|commit"
+        },
+        {
+          "id": "source-import",
+          "label": "source import and materialization",
+          "file": "__tests__/goalControlSourceHandoff.test.ts",
+          "testNamePattern": "^(?!.*(?:checkpoint|index.lock|ref publication|branch|reflog|bisect|commit)).*(?:import|destination|materialization)"
+        },
+        {
+          "id": "source-export",
+          "label": "source export, snapshot, and staging",
+          "file": "__tests__/goalControlSourceHandoff.test.ts",
+          "testNamePattern": "^(?!.*(?:checkpoint|index.lock|ref publication|branch|reflog|bisect|commit))(?!.*(?:import|destination|materialization)).*(?:export|snapshot|staging|artifact)"
+        },
+        {
+          "id": "source-compatibility",
+          "label": "source handoff compatibility and remaining invariants",
+          "file": "__tests__/goalControlSourceHandoff.test.ts",
+          "testNamePattern": "^(?!.*(?:checkpoint|index.lock|ref publication|branch|reflog|bisect|commit))(?!.*(?:import|destination|materialization))(?!.*(?:export|snapshot|staging|artifact)).*$"
+        },
+        {
+          "id": "codex-rollout-handoff",
+          "label": "Codex rollout handoff",
+          "file": "__tests__/goalControlCodexRolloutHandoff.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "github-resource",
+      "label": "GitHub / resource",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "resource-lease-lifecycle",
+          "label": "resource acquire, renew, release, and lease lifecycle",
+          "file": "__tests__/resourceControl.test.ts",
+          "testNamePattern": "acquire|acquisition|renew|release|lease|fencing"
+        },
+        {
+          "id": "resource-incidents-holds",
+          "label": "resource identity incidents and hard holds",
+          "file": "__tests__/resourceControl.test.ts",
+          "testNamePattern": "^(?!.*(?:acquire|acquisition|renew|release|lease|fencing)).*(?:incident|hard hold|capability|SIGKILL|transaction)"
+        },
+        {
+          "id": "resource-policy",
+          "label": "resource policy and remaining invariants",
+          "file": "__tests__/resourceControl.test.ts",
+          "testNamePattern": "^(?!.*(?:acquire|acquisition|renew|release|lease|fencing))(?!.*(?:incident|hard hold|capability|SIGKILL|transaction)).*$"
+        },
+        {
+          "id": "canary-plan",
+          "label": "GitHub and host canary plan",
+          "file": "__tests__/goalControlCanaryPlan.test.ts"
+        },
+        {
+          "id": "canary-bootstrap",
+          "label": "canary bootstrap",
+          "file": "__tests__/goalControlCanaryBootstrap.test.ts"
+        },
+        {
+          "id": "canary-bootstrap-artifacts",
+          "label": "canary bootstrap artifacts",
+          "file": "__tests__/goalControlCanaryBootstrapArtifacts.test.ts"
+        },
+        {
+          "id": "preclaim-issues",
+          "label": "GitHub preclaim issues",
+          "file": "__tests__/goalControlPreclaimIssues.test.ts"
+        },
+        {
+          "id": "browser-canary-server",
+          "label": "browser canary resource server",
+          "file": "__tests__/browserCanaryServer.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "usability-security",
+      "label": "Usability / security",
+      "budgetSeconds": 1200,
+      "entries": [
+        {
+          "id": "security-capability-chain",
+          "label": "security capability chain",
+          "file": "__tests__/goalControlSecurity.test.ts",
+          "testNamePattern": "goal control capability chain"
+        },
+        {
+          "id": "security-evidence-registry",
+          "label": "security trusted evidence registry",
+          "file": "__tests__/goalControlSecurity.test.ts",
+          "testNamePattern": "goal control trusted evidence registry"
+        },
+        {
+          "id": "security-rejection-recovery",
+          "label": "security rejection containment and pristine recovery",
+          "file": "__tests__/goalControlSecurity.test.ts",
+          "testNamePattern": "goal control rejection containment|goal event pristine odd recovery|goal command pristine generation recovery"
+        },
+        {
+          "id": "usability-adoption-scaffold",
+          "label": "usability protocol adoption and scaffold",
+          "file": "__tests__/goalControlUsability.test.ts",
+          "testNamePattern": "adoption|scaffold"
+        },
+        {
+          "id": "usability-runtime-templates",
+          "label": "usability templates, preflight, runtime, and source advance",
+          "file": "__tests__/goalControlUsability.test.ts",
+          "testNamePattern": "^(?!.*(?:adoption|scaffold)).*(?:template|preflight|runtime|source advance|checkpoint hold)"
+        },
+        {
+          "id": "usability-remaining",
+          "label": "usability help, init, doctor, and remaining flows",
+          "file": "__tests__/goalControlUsability.test.ts",
+          "testNamePattern": "^(?!.*(?:adoption|scaffold))(?!.*(?:template|preflight|runtime|source advance|checkpoint hold)).*$"
+        },
+        {
+          "id": "preflight",
+          "label": "worker binding and preflight security",
+          "file": "__tests__/goalControlPreflight.test.ts"
+        },
+        {
+          "id": "full-suite-runner",
+          "label": "full-suite runner manifest, redaction, and budget policy",
+          "file": "__tests__/fullSuiteRunner.test.ts"
+        }
+      ]
+    }
+  ]
+}
